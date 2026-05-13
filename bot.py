@@ -30,9 +30,6 @@ from flask import Flask, abort, request as flask_request
 BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
 RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
-print(f"📁 TEMPLATE_PATH = {TEMPLATE_PATH}")
-print(f"📁 Файл существует: {os.path.exists(TEMPLATE_PATH)}")
-print(f"📁 Рабочая директория: {os.getcwd()}")
 MSK           = timezone(timedelta(hours=3))
 
 # =============================================================================
@@ -92,6 +89,11 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     html = html.replace("{{VEHICLE}}",       vehicle)
     html = html.replace("{{TC}}",            vehicle)
     html = html.replace("{{DATETIME}}",      payment_dt.strftime("%d.%m.%Y %H:%M"))
+    # Добавляем id к тегу таймера ДО замены {{ELAPSED}} — иначе строка не совпадёт
+    html = html.replace(
+        '<strong _ngcontent-ng-c2869113626>{{ELAPSED}}</strong>',
+        '<strong _ngcontent-ng-c2869113626 id="elapsed-timer">{{ELAPSED}}</strong>',
+    )
     html = html.replace("{{ELAPSED}}",       elapsed_str)
     html = html.replace("{{T_PAY}}",         str(payment_unix))
     html = html.replace("{{TICKET_SERIAL}}", generate_ticket_serial())
@@ -104,11 +106,6 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
         'style="width:100%;max-width:100vw;height:auto;display:block;',
     )
 
-    # Добавляем id к тегу таймера чтобы JS нашёл его по getElementById
-    html = html.replace(
-        f'<strong _ngcontent-ng-c2869113626>{elapsed_str}</strong>',
-        f'<strong _ngcontent-ng-c2869113626 id="elapsed-timer">{elapsed_str}</strong>',
-    )
 
     # JS-таймер: точный, без накопленной ошибки
     timer_script = f"""
