@@ -33,6 +33,15 @@ TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templa
 MSK           = timezone(timedelta(hours=3))
 
 # =============================================================================
+# WHITELIST — список Telegram user_id которым разрешено пользоваться ботом.
+# Добавить нового пользователя: вписать его user_id в этот set.
+# Узнать свой id можно у @userinfobot в Telegram.
+# =============================================================================
+WHITELIST: set[int] = {
+    2021457397,   # владелец бота
+}
+
+# =============================================================================
 # FLASK + БОТ
 # =============================================================================
 
@@ -137,6 +146,25 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
 
     return html.encode("utf-8")
 
+
+
+def is_allowed(user_id: int) -> bool:
+    """Возвращает True если пользователь есть в whitelist."""
+    return user_id in WHITELIST
+
+
+def check_access(message: types.Message) -> bool:
+    """
+    Проверяет доступ. Если пользователя нет в whitelist —
+    отправляет отказ и возвращает False. Используется в начале каждого хендлера.
+    """
+    if not is_allowed(message.from_user.id):
+        bot.send_message(
+            message.chat.id,
+            "⛔ У вас нет доступа к этому боту.",
+        )
+        return False
+    return True
 
 # =============================================================================
 # ХРАНИЛИЩЕ СОСТОЯНИЙ
@@ -260,6 +288,7 @@ def _send_ticket(
 
 @bot.message_handler(commands=["start", "help"])
 def handle_start(message: types.Message):
+    if not check_access(message): return
     get_user(message.from_user.id)
     bot.send_message(
         message.chat.id,
@@ -270,6 +299,7 @@ def handle_start(message: types.Message):
 
 @bot.message_handler(func=lambda m: m.text == "🎫 Новый билет")
 def handle_new_ticket(message: types.Message):
+    if not check_access(message): return
     get_user(message.from_user.id)["state"] = "awaiting_input"
     bot.send_message(
         message.chat.id,
@@ -280,6 +310,7 @@ def handle_new_ticket(message: types.Message):
 
 @bot.message_handler(func=lambda m: m.text == "🔁 Повторить последний")
 def handle_repeat_last(message: types.Message):
+    if not check_access(message): return
     user = get_user(message.from_user.id)
     if not user["last"]:
         bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
@@ -290,6 +321,7 @@ def handle_repeat_last(message: types.Message):
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Избранное")
 def handle_favorites(message: types.Message):
+    if not check_access(message): return
     user = get_user(message.from_user.id)
     if not user["favorites"]:
         bot.send_message(
@@ -307,6 +339,7 @@ def handle_favorites(message: types.Message):
 
 @bot.message_handler(func=lambda m: get_user(m.from_user.id).get("state") == "awaiting_input")
 def handle_input(message: types.Message):
+    if not check_access(message): return
     user = get_user(message.from_user.id)
     parts = message.text.strip().split()
     if len(parts) != 2:
@@ -325,6 +358,7 @@ def handle_input(message: types.Message):
     func=lambda m: str(get_user(m.from_user.id).get("state", "")).startswith("awaiting_vehicle:")
 )
 def handle_vehicle_input(message: types.Message):
+    if not check_access(message): return
     user  = get_user(message.from_user.id)
     route = user["state"].split(":", 1)[1]
     user["state"] = None
