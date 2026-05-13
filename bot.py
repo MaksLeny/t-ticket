@@ -89,16 +89,40 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     html = html.replace("{{VEHICLE}}",       vehicle)
     html = html.replace("{{TC}}",            vehicle)
     html = html.replace("{{DATETIME}}",      payment_dt.strftime("%d.%m.%Y %H:%M"))
-    # Добавляем id к тегу таймера ДО замены {{ELAPSED}} — иначе строка не совпадёт
-    html = html.replace(
-        '<strong _ngcontent-ng-c2869113626>{{ELAPSED}}</strong>',
-        '<strong _ngcontent-ng-c2869113626 id="elapsed-timer">{{ELAPSED}}</strong>',
-    )
     html = html.replace("{{ELAPSED}}",       elapsed_str)
     html = html.replace("{{T_PAY}}",         str(payment_unix))
     html = html.replace("{{TICKET_SERIAL}}", generate_ticket_serial())
     html = html.replace("{{TICKET_NUMBER}}", generate_ticket_number(payment_dt))
     html = html.replace("{{PRICE}}",         "53")
+
+    # Заменяем встроенный скрипт шаблона на наш рабочий таймер
+    # (оригинальный скрипт ищет {{T_PAY}} который уже заменён — таймер не работал)
+    timer_script_inline = f"""
+    // Живой таймер — считает секунды с момента оплаты
+    (function() {{
+      var paymentUnix = {payment_unix};
+      function pad(n) {{ return n < 10 ? '0' + n : '' + n; }}
+      function tick() {{
+        var total = Math.max(0, Math.floor(Date.now() / 1000) - paymentUnix);
+        var h = Math.floor(total / 3600);
+        var m = Math.floor((total % 3600) / 60);
+        var s = total % 60;
+        var text = (h > 0 ? pad(h) + ':' : '') + pad(m) + ':' + pad(s);
+        // Ищем все <strong> и обновляем тот у которого текст похож на таймер MM:SS
+        var strongs = document.querySelectorAll('strong');
+        strongs.forEach(function(el) {{
+          if (/^\d{{2}}:\d{{2}}/.test(el.textContent.trim())) {{
+            el.textContent = text;
+          }}
+        }});
+      }}
+      tick();
+      setInterval(tick, 1000);
+    }})();
+    """
+    # Находим существующий <script> в шаблоне и заменяем его содержимое
+    import re as _re
+    html = _re.sub(r'(<script[^>]*>).*?(</script>)', r'' + timer_script_inline + r'', html, count=1, flags=_re.DOTALL)
 
     # Адаптивный QR-код (SingleFile хардкодит 1880×1880px)
     html = html.replace(
@@ -107,26 +131,6 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     )
 
 
-    # JS-таймер: точный, без накопленной ошибки
-    timer_script = f"""
-<script>
-(function() {{
-  var paymentUnix = {payment_unix};
-  function pad(n) {{ return n < 10 ? '0' + n : '' + n; }}
-  function tick() {{
-    var total = Math.max(0, Math.floor(Date.now() / 1000) - paymentUnix);
-    var h = Math.floor(total / 3600);
-    var m = Math.floor((total % 3600) / 60);
-    var s = total % 60;
-    var el = document.getElementById('elapsed-timer');
-    if (el) el.textContent = (h > 0 ? pad(h) + ':' : '') + pad(m) + ':' + pad(s);
-  }}
-  tick();
-  setInterval(tick, 1000);
-}})();
-</script>
-"""
-    html = html.replace("</body>", timer_script + "</body>")
     return html.encode("utf-8")
 
 
