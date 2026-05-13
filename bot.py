@@ -127,7 +127,7 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     if si != -1 and ei != -1:
         timer_js = (
             "\n(function() {\n"
-            "  var p = " + str(payment_unix) + ";\n"
+            "  var p = " + str(payment_unix - 23) + ";\n"
             "  function pad(n){return n<10?'0'+n:''+n;}\n"
             "  function tick(){\n"
             "    var t=Math.max(0,Math.floor(Date.now()/1000)-p);\n"
@@ -197,7 +197,7 @@ def main_keyboard() -> types.ReplyKeyboardMarkup:
     )
     kb.row(
         types.KeyboardButton("📋 Справка"),
-        types.KeyboardButton("📊 Статус"),
+        types.KeyboardButton("ℹ️ О боте"),
     )
     return kb
 
@@ -234,6 +234,7 @@ def favorites_keyboard(favorites: list, edit_mode: bool = False) -> types.Inline
         kb.add(types.InlineKeyboardButton("✏️ Редактировать", callback_data="fav:edit"))
         kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="fav:close"))
     return kb
+
 
 
 def _cleanup_expired_tickets() -> int:
@@ -301,74 +302,133 @@ def _send_ticket(
 
 @bot.message_handler(commands=["start"])
 def handle_start(message: types.Message):
-    if not check_access(message): return
-    get_user(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        "👋 Привет! Я помогу быстро создать уведомление об оплате проезда.\n\n" \
-        "Нажми «🎫 Новый билет», чтобы начать, или используй /help для подробной информации.\n" \
-        "Если хочешь ещё раз отправить прошлый маршрут, нажми «🔁 Повторить последний».",
-        parse_mode="Markdown",
-        reply_markup=main_keyboard(),
-    )
+    try:
+        if not check_access(message): return
+        get_user(message.from_user.id)
+        welcome_text = (
+            "👋 *Привет, добро пожаловать!*\n\n"
+            "Я помогаю быстро генерировать уведомления об оплате проезда.\n\n"
+            "💡 *Что я умею:*\n"
+            "• Создавать билеты за секунду\n"
+            "• Сохранять избранные маршруты\n"
+            "• Повторно использовать последний билет\n\n"
+            "Выбери действие ниже или используй /help для подробной справки."
+        )
+        bot.send_message(
+            message.chat.id,
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=main_keyboard(),
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_start: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка инициализации бота.")
+        except:
+            pass
 
 
 @bot.message_handler(commands=["help"])
 def handle_help(message: types.Message):
-    if not check_access(message): return
-    bot.send_message(
-        message.chat.id,
-        "📚 *Справка по боту*\n\n"
-        "🎫 *Новый билет* — создай новый билет по маршруту и номеру ТС.\n"
-        "🔁 *Повторить последний* — быстро повторяет последние данные.\n"
-        "⭐ *Избранное* — сохраняй маршруты для повторного использования.\n"
-        "📊 *Статус* — показывает текущую информацию о твоём последнем билете.\n\n"
-        "*Как использовать:*\n"
-        "Введи: `10А 1140` — маршрут и номер ТС через пробел.\n"
-        "После создания билета нажми «⭐ В избранное», чтобы сохранить маршрут.\n\n"
-        "*Удобно:* ты можешь редактировать избранное, удаляя маршруты в режиме редактирования.",
-        parse_mode="Markdown",
-    )
+    try:
+        if not check_access(message): return
+        help_text = (
+            "📚 *Справка по боту*\n\n"
+            "*Основные команды:*\n"
+            "🎫 *Новый билет* — создать билет (нужны маршрут и номер ТС)\n"
+            "🔁 *Повторить последний* — быстро создать билет с теми же данными\n"
+            "⭐ *Избранное* — управление сохранённными маршрутами\n\n"
+            "*Примеры использования:*\n"
+            "• Введи: `10А 1140`\n"
+            "• После генерации жми «⭐ В избранное» для сохранения\n"
+            "• В избранном можно отредактировать номер ТС\n\n"
+            "*Технические детали:*\n"
+            "• Билет действует 1 час с момента создания\n"
+            "• Используй /status для информации о текущем билете\n"
+        )
+        bot.send_message(
+            message.chat.id,
+            help_text,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_help: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при выводе справки.")
+        except:
+            pass
 
 
 @bot.message_handler(commands=["status"])
 def handle_status(message: types.Message):
-    if not check_access(message): return
-    user = get_user(message.from_user.id)
-    last_info = "нет"
-    if user["last"]:
-        route, vehicle = user["last"]
-        last_info = f"№{route} · ТС {vehicle}"
-    fav_count = len(user["favorites"])
-    bot.send_message(
-        message.chat.id,
-        f"📊 *Статус*\n\nПоследний билет: {last_info}\n" \
-        f"Избранное: {fav_count} маршрут(ов).\n" \
-        "Пользуйся /help, если нужно напомнить команды.",
-        parse_mode="Markdown",
-    )
+    try:
+        if not check_access(message): return
+        user = get_user(message.from_user.id)
+        
+        status_lines = ["📊 *Ваша информация:*\n"]
+        
+        if user["last"]:
+            route, vehicle = user["last"]
+            status_lines.append(f"🚌 Последний билет: №{route} · ТС {vehicle}")
+        else:
+            status_lines.append("🚌 Последний билет: не создан")
+        
+        if user["favorites"]:
+            status_lines.append(f"⭐ Избранные маршруты: {', '.join(f'№{r}' for r in user['favorites'])}")
+        else:
+            status_lines.append("⭐ Избранные маршруты: нет")
+        
+        active_count = sum(1 for _, (_, exp) in ticket_store.items() 
+                           if datetime.now(timezone.utc).timestamp() <= exp)
+        status_lines.append(f"🎫 Активные билеты в системе: {active_count}")
+        
+        bot.send_message(
+            message.chat.id,
+            "\n".join(status_lines),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_status: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при получении статуса.")
+        except:
+            pass
 
 
 @bot.message_handler(func=lambda m: m.text == "🎫 Новый билет")
 def handle_new_ticket(message: types.Message):
-    if not check_access(message): return
-    get_user(message.from_user.id)["state"] = "awaiting_input"
-    bot.send_message(
-        message.chat.id,
-        "Введи *маршрут* и *номер ТС* через пробел.\n\nПример: `10А 1140`",
-        parse_mode="Markdown",
-    )
+    try:
+        if not check_access(message): return
+        get_user(message.from_user.id)["state"] = "awaiting_input"
+        bot.send_message(
+            message.chat.id,
+            "Введи *маршрут* и *номер ТС* через пробел.\n\nПример: `10А 1140`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_new_ticket: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка инициализации.")
+        except:
+            pass
 
 
 @bot.message_handler(func=lambda m: m.text == "🔁 Повторить последний")
 def handle_repeat_last(message: types.Message):
-    if not check_access(message): return
-    user = get_user(message.from_user.id)
-    if not user["last"]:
-        bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
-        return
-    route, vehicle = user["last"]
-    _send_ticket(message, route, vehicle)
+    try:
+        if not check_access(message): return
+        user = get_user(message.from_user.id)
+        if not user["last"]:
+            bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
+            return
+        route, vehicle = user["last"]
+        _send_ticket(message, route, vehicle)
+    except Exception as e:
+        print(f"❌ Ошибка в handle_repeat_last: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при повторении билета.")
+        except:
+            pass
 
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Избранное")
@@ -378,151 +438,228 @@ def handle_favorites(message: types.Message):
     if not user["favorites"]:
         bot.send_message(
             message.chat.id,
-            "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное», чтобы добавить маршрут.",
+            "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
         )
         return
     bot.send_message(
         message.chat.id,
-        "⭐ *Избранные маршруты:*\n\nНажми на маршрут, чтобы создать билет, или выбери редактирование.",
+        f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
         parse_mode="Markdown",
-        reply_markup=favorites_keyboard(user["favorites"]),
+        reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
     )
+
+
+@bot.message_handler(func=lambda m: m.text == "📋 Справка")
+def handle_help_button(message: types.Message):
+    try:
+        if not check_access(message): return
+        handle_help(message)
+    except Exception as e:
+        print(f"❌ Ошибка в handle_help_button: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при открытии справки.")
+        except:
+            pass
+
+
+@bot.message_handler(func=lambda m: m.text == "ℹ️ О боте")
+def handle_about(message: types.Message):
+    try:
+        if not check_access(message): return
+        about_text = (
+            "ℹ️ *О боте*\n\n"
+            "🤖 *Telegram Ticket Bot*\n"
+            "Простой и быстрый инструмент для генерации уведомлений об оплате проезда.\n\n"
+            "✨ *Возможности:*\n"
+            "• Генерация QR-кодов и билетов за одну секунду\n"
+            "• Сохранение избранных маршрутов\n"
+            "• Автоматический таймер с момента оплаты\n"
+            "• Безопасное хранилище (1 час)\n\n"
+            "🔐 *Безопасность:*\n"
+            "• Доступ только авторизованным пользователям\n"
+            "• Билеты автоматически удаляются через час\n\n"
+            "Введи /help для подробной справки."
+        )
+        bot.send_message(
+            message.chat.id,
+            about_text,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_about: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при открытии информации о боте.")
+        except:
+            pass
 
 
 @bot.message_handler(func=lambda m: get_user(m.from_user.id).get("state") == "awaiting_input")
 def handle_input(message: types.Message):
-    if not check_access(message): return
-    user = get_user(message.from_user.id)
-    parts = message.text.strip().split()
-    if len(parts) != 2:
-        bot.send_message(
-            message.chat.id,
-            "❌ Неверный формат. Введи ровно два значения через пробел.\nПример: `10А 1140`",
-            parse_mode="Markdown",
-        )
-        return
-    route, vehicle = parts[0].upper(), parts[1].upper()
-    if not (1 <= len(route) <= 10 and 1 <= len(vehicle) <= 10):
-        bot.send_message(
-            message.chat.id,
-            "❌ Неверный формат. Используй до 10 символов для маршрута и номера ТС.",
-            parse_mode="Markdown",
-        )
-        return
-    user["state"] = None
-    _send_ticket(message, route, vehicle, is_new_ticket=True)
+    try:
+        if not check_access(message): return
+        user = get_user(message.from_user.id)
+        parts = message.text.strip().split()
+        if len(parts) != 2:
+            bot.send_message(
+                message.chat.id,
+                "❌ Неверный формат. Введи ровно два значения через пробел.\nПример: `10А 1140`",
+                parse_mode="Markdown",
+            )
+            return
+        user["state"] = None
+        route, vehicle = parts[0].upper(), parts[1]
+        _send_ticket(message, route, vehicle, is_new_ticket=True)
+    except Exception as e:
+        print(f"❌ Ошибка в handle_input: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
+        except:
+            pass
 
 
 @bot.message_handler(
     func=lambda m: str(get_user(m.from_user.id).get("state", "")).startswith("awaiting_vehicle:")
 )
 def handle_vehicle_input(message: types.Message):
-    if not check_access(message): return
-    user  = get_user(message.from_user.id)
-    route = user["state"].split(":", 1)[1]
-    user["state"] = None
-    _send_ticket(
-        message, route, message.text.strip(),
-        msg_date_override=int(datetime.now(timezone.utc).timestamp()),
-    )
+    try:
+        if not check_access(message): return
+        user  = get_user(message.from_user.id)
+        route = user["state"].split(":", 1)[1]
+        user["state"] = None
+        _send_ticket(
+            message, route, message.text.strip(),
+            msg_date_override=int(datetime.now(timezone.utc).timestamp()),
+        )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_vehicle_input: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
+        except:
+            pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav:"))
 def handle_fav_callback(call: types.CallbackQuery):
-    user    = get_user(call.from_user.id)
-    payload = call.data[4:]
+    try:
+        user    = get_user(call.from_user.id)
+        payload = call.data[4:]
 
-    if payload == "close":
+        if payload == "close":
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.answer_callback_query(call.id)
+            return
+        
+        if payload == "edit":
+            bot.edit_message_text(
+                f"⭐ *Редактирование избранного ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут для удаления:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
+            )
+            bot.answer_callback_query(call.id)
+            return
+        
+        if payload == "back":
+            bot.edit_message_text(
+                f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
+            )
+            bot.answer_callback_query(call.id)
+            return
+
+        idx = int(payload)
+        if idx >= len(user["favorites"]):
+            bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
+            return
+
+        route = user["favorites"][idx]
+        bot.answer_callback_query(call.id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id)
-        return
-
-    if payload == "edit":
-        bot.edit_message_text(
-            "⭐ *Редактирование избранного:*\n\nНажми на маршрут, чтобы удалить его.",
+        user["state"] = f"awaiting_vehicle:{route}"
+        bot.send_message(
             call.message.chat.id,
-            call.message.message_id,
+            f"Маршрут №*{route}* выбран.\nВведи номер ТС:",
             parse_mode="Markdown",
-            reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
         )
-        bot.answer_callback_query(call.id)
-        return
-
-    if payload == "back":
-        bot.edit_message_text(
-            "⭐ *Избранные маршруты:*\n\nНажми на маршрут, чтобы создать билет, или выбери редактирование.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    idx = int(payload)
-    if idx >= len(user["favorites"]):
-        bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
-        return
-
-    route = user["favorites"][idx]
-    bot.answer_callback_query(call.id)
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    user["state"] = f"awaiting_vehicle:{route}"
-    bot.send_message(
-        call.message.chat.id,
-        f"Маршрут №*{route}* выбран.\nВведи номер ТС:",
-        parse_mode="Markdown",
-    )
+    except Exception as e:
+        print(f"❌ Ошибка в handle_fav_callback: {e}")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
+        except:
+            pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("remove_fav:"))
 def handle_remove_fav_callback(call: types.CallbackQuery):
-    user = get_user(call.from_user.id)
-    idx = int(call.data[11:])
-    if idx >= len(user["favorites"]):
-        bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
-        return
-
-    removed_route = user["favorites"].pop(idx)
-    bot.answer_callback_query(call.id, f"✅ Маршрут №{removed_route} удалён из избранного.")
-
-    if not user["favorites"]:
-        bot.edit_message_text(
-            "⭐ Список избранного пуст.\n\nПосле создания нового билета нажми «⭐ В избранное».",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-        )
-    else:
-        bot.edit_message_text(
-            "⭐ *Редактирование избранного:*\n\nНажми на маршрут, чтобы удалить его.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
-        )
+    try:
+        user = get_user(call.from_user.id)
+        idx = int(call.data[11:])
+        if idx >= len(user["favorites"]):
+            bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
+            return
+        
+        removed_route = user["favorites"].pop(idx)
+        bot.answer_callback_query(call.id, f"✅ Маршрут №{removed_route} удалён из избранного!")
+        
+        if not user["favorites"]:
+            bot.edit_message_text(
+                "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
+                call.message.chat.id,
+                call.message.message_id,
+            )
+        else:
+            bot.edit_message_text(
+                f"⭐ *Редактирование избранного ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут для удаления:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
+            )
+    except (ValueError, IndexError):
+        print(f"❌ Ошибка парсинга индекса в handle_remove_fav_callback")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ Ошибка при удалении.")
+        except:
+            pass
+    except Exception as e:
+        print(f"❌ Ошибка в handle_remove_fav_callback: {e}")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ Ошибка обработки.")
+        except:
+            pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_fav:"))
 def handle_add_fav_callback(call: types.CallbackQuery):
-    user  = get_user(call.from_user.id)
-    route = call.data[8:]
-
-    if route in user["favorites"]:
-        bot.answer_callback_query(call.id, "⭐ Уже в избранном!")
-        return
-
-    user["favorites"].append(route)
-    bot.answer_callback_query(call.id, f"✅ Маршрут №{route} добавлен в избранное!")
-
     try:
-        bot.edit_message_reply_markup(
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=types.InlineKeyboardMarkup(),
-        )
-    except Exception:
-        pass
+        user  = get_user(call.from_user.id)
+        route = call.data[8:]
+
+        if route in user["favorites"]:
+            bot.answer_callback_query(call.id, "⭐ Уже в избранном!")
+            return
+
+        user["favorites"].append(route)
+        bot.answer_callback_query(call.id, f"✅ Маршрут №{route} добавлен в избранное!")
+
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=types.InlineKeyboardMarkup(),
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"❌ Ошибка в handle_add_fav_callback: {e}")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ Ошибка добавления в избранное.")
+        except:
+            pass
 
 
 # =============================================================================
