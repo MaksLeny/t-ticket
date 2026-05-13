@@ -195,6 +195,10 @@ def main_keyboard() -> types.ReplyKeyboardMarkup:
         types.KeyboardButton("🔁 Повторить последний"),
         types.KeyboardButton("⭐ Избранное"),
     )
+    kb.row(
+        types.KeyboardButton("📋 Справка"),
+        types.KeyboardButton("ℹ️ О боте"),
+    )
     return kb
 
 
@@ -211,14 +215,24 @@ def ticket_keyboard(token: str, route: str) -> types.InlineKeyboardMarkup:
     return kb
 
 
-def favorites_keyboard(favorites: list) -> types.InlineKeyboardMarkup:
+def favorites_keyboard(favorites: list, edit_mode: bool = False) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
     for i, route in enumerate(favorites):
-        kb.add(types.InlineKeyboardButton(
-            text=f"№{route}",
-            callback_data=f"fav:{i}",
-        ))
-    kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="fav:close"))
+        if edit_mode:
+            kb.add(types.InlineKeyboardButton(
+                text=f"❌ №{route}",
+                callback_data=f"remove_fav:{i}",
+            ))
+        else:
+            kb.add(types.InlineKeyboardButton(
+                text=f"№{route}",
+                callback_data=f"fav:{i}",
+            ))
+    if edit_mode:
+        kb.add(types.InlineKeyboardButton("◀️ Назад", callback_data="fav:back"))
+    else:
+        kb.add(types.InlineKeyboardButton("✏️ Редактировать", callback_data="fav:edit"))
+        kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="fav:close"))
     return kb
 
 
@@ -286,14 +300,77 @@ def _send_ticket(
 # ОБРАБОТЧИКИ БОТА
 # =============================================================================
 
-@bot.message_handler(commands=["start", "help"])
+@bot.message_handler(commands=["start"])
 def handle_start(message: types.Message):
     if not check_access(message): return
     get_user(message.from_user.id)
+    welcome_text = (
+        "👋 *Привет, добро пожаловать!*\n\n"
+        "Я помогаю быстро генерировать уведомления об оплате проезда.\n\n"
+        "💡 *Что я умею:*\n"
+        "• Создавать билеты за секунду\n"
+        "• Сохранять избранные маршруты\n"
+        "• Повторно использовать последний билет\n\n"
+        "Выбери действие ниже или используй /help для подробной справки."
+    )
     bot.send_message(
         message.chat.id,
-        "👋 Привет! Я генерирую уведомления об оплате проезда.\n\nВыбери действие:",
+        welcome_text,
+        parse_mode="Markdown",
         reply_markup=main_keyboard(),
+    )
+
+
+@bot.message_handler(commands=["help"])
+def handle_help(message: types.Message):
+    if not check_access(message): return
+    help_text = (
+        "📚 *Справка по боту*\n\n"
+        "*Основные команды:*\n"
+        "🎫 *Новый билет* — создать билет (нужны маршрут и номер ТС)\n"
+        "🔁 *Повторить последний* — быстро создать билет с теми же данными\n"
+        "⭐ *Избранное* — управление сохранённными маршрутами\n\n"
+        "*Примеры использования:*\n"
+        "• Введи: `10А 1140`\n"
+        "• После генерации жми «⭐ В избранное» для сохранения\n"
+        "• В избранном можно отредактировать номер ТС\n\n"
+        "*Технические детали:*\n"
+        "• Билет действует 1 час с момента создания\n"
+        "• Используй /status для информации о текущем билете\n"
+    )
+    bot.send_message(
+        message.chat.id,
+        help_text,
+        parse_mode="Markdown",
+    )
+
+
+@bot.message_handler(commands=["status"])
+def handle_status(message: types.Message):
+    if not check_access(message): return
+    user = get_user(message.from_user.id)
+    
+    status_lines = ["📊 *Ваша информация:*\n"]
+    
+    if user["last"]:
+        route, vehicle = user["last"]
+        status_lines.append(f"🚌 Последний билет: №{route} · ТС {vehicle}")
+    else:
+        status_lines.append("🚌 Последний билет: не создан")
+    
+    if user["favorites"]:
+        status_lines.append(f"⭐ Избранные маршруты: {', '.join(f'№{r}' for r in user['favorites'])}")
+    else:
+        status_lines.append("⭐ Избранные маршруты: нет")
+    
+    active_count = sum(1 for _, (_, exp) in ticket_store.items() 
+                       if datetime.now(timezone.utc).timestamp() <= exp)
+    status_lines.append(f"🎫 Активные билеты в системе: {active_count}")
+    
+    bot.send_message(
+        message.chat.id,
+        "\n".join(status_lines),
+        parse_mode="Markdown",
     )
 
 
@@ -331,9 +408,39 @@ def handle_favorites(message: types.Message):
         return
     bot.send_message(
         message.chat.id,
-        "⭐ *Избранные маршруты:*",
+        f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
         parse_mode="Markdown",
-        reply_markup=favorites_keyboard(user["favorites"]),
+        reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "📋 Справка")
+def handle_help_button(message: types.Message):
+    if not check_access(message): return
+    handle_help(message)
+
+
+@bot.message_handler(func=lambda m: m.text == "ℹ️ О боте")
+def handle_about(message: types.Message):
+    if not check_access(message): return
+    about_text = (
+        "ℹ️ *О боте*\n\n"
+        "🤖 *Telegram Ticket Bot*\n"
+        "Простой и быстрый инструмент для генерации уведомлений об оплате проезда.\n\n"
+        "✨ *Возможности:*\n"
+        "• Генерация QR-кодов и билетов за одну секунду\n"
+        "• Сохранение избранных маршрутов\n"
+        "• Автоматический таймер с момента оплаты\n"
+        "• Безопасное хранилище (1 час)\n\n"
+        "🔐 *Безопасность:*\n"
+        "• Доступ только авторизованным пользователям\n"
+        "• Билеты автоматически удаляются через час\n\n"
+        "Введи /help для подробной справки."
+    )
+    bot.send_message(
+        message.chat.id,
+        about_text,
+        parse_mode="Markdown",
     )
 
 
@@ -377,6 +484,28 @@ def handle_fav_callback(call: types.CallbackQuery):
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id)
         return
+    
+    if payload == "edit":
+        bot.edit_message_text(
+            f"⭐ *Редактирование избранного ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут для удаления:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
+        )
+        bot.answer_callback_query(call.id)
+        return
+    
+    if payload == "back":
+        bot.edit_message_text(
+            f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
+        )
+        bot.answer_callback_query(call.id)
+        return
 
     idx = int(payload)
     if idx >= len(user["favorites"]):
@@ -392,6 +521,36 @@ def handle_fav_callback(call: types.CallbackQuery):
         f"Маршрут №*{route}* выбран.\nВведи номер ТС:",
         parse_mode="Markdown",
     )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("remove_fav:"))
+def handle_remove_fav_callback(call: types.CallbackQuery):
+    user = get_user(call.from_user.id)
+    try:
+        idx = int(call.data[11:])
+        if idx >= len(user["favorites"]):
+            bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
+            return
+        
+        removed_route = user["favorites"].pop(idx)
+        bot.answer_callback_query(call.id, f"✅ Маршрут №{removed_route} удалён из избранного!")
+        
+        if not user["favorites"]:
+            bot.edit_message_text(
+                "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
+                call.message.chat.id,
+                call.message.message_id,
+            )
+        else:
+            bot.edit_message_text(
+                f"⭐ *Редактирование избранного ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут для удаления:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
+            )
+    except (ValueError, IndexError):
+        bot.answer_callback_query(call.id, "⚠️ Ошибка при удалении.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_fav:"))
