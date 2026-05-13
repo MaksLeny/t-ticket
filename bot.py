@@ -39,8 +39,9 @@ MSK           = timezone(timedelta(hours=3))
 flask_app = Flask(__name__)
 bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-# Хранилище HTML-билетов: token → html_bytes
-ticket_store: dict[str, bytes] = {}
+# Хранилище HTML-билетов: token → (html_bytes, expires_at)
+# expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
+ticket_store: dict[str, tuple] = {}
 
 
 @flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
@@ -52,15 +53,23 @@ def webhook():
 
 @flask_app.route("/ticket/<token>")
 def serve_ticket(token: str):
-    html = ticket_store.get(token)
-    if html is None:
+    entry = ticket_store.get(token)
+    if entry is None:
         abort(404)
-    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+    html_bytes, expires_at = entry
+    # Билет просрочен — отдаём 410 Gone вместо 404 чтобы пользователь понял почему
+    if datetime.now(timezone.utc).timestamp() > expires_at:
+        ticket_store.pop(token, None)
+        abort(410)
+    return html_bytes, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @flask_app.route("/healthz")
 def health():
-    return "ok", 200
+    now = datetime.now(timezone.utc).timestamp()
+    active = sum(1 for _, (_, exp) in ticket_store.items() if now <= exp)
+    total  = len(ticket_store)
+    return {"status": "ok", "tickets_active": active, "tickets_total": total}, 200
 
 
 # =============================================================================
@@ -185,6 +194,20 @@ def favorites_keyboard(favorites: list) -> types.InlineKeyboardMarkup:
     return kb
 
 
+
+def _cleanup_expired_tickets() -> int:
+    """
+    Удаляет из ticket_store все записи у которых истёк срок хранения.
+    Вызывается при каждой генерации нового билета — O(n) по числу записей,
+    но n мало (1 запись на пользователя в час → не более нескольких тысяч).
+    Возвращает количество удалённых записей.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    expired = [t for t, (_, exp) in ticket_store.items() if now > exp]
+    for t in expired:
+        ticket_store.pop(t, None)
+    return len(expired)
+
 # =============================================================================
 # ЯДРО: ГЕНЕРАЦИЯ И ОТПРАВКА БИЛЕТА
 # =============================================================================
@@ -215,8 +238,13 @@ def _send_ticket(
         bot.send_message(message.chat.id, "❌ Файл template.html не найден.")
         return
 
+    # Чистим устаревшие билеты перед добавлением нового
+    _cleanup_expired_tickets()
+
     token = uuid.uuid4().hex
-    ticket_store[token] = html_bytes
+    # Билет живёт 1 час (3600 секунд) с момента генерации
+    expires_at = datetime.now(timezone.utc).timestamp() + 3600
+    ticket_store[token] = (html_bytes, expires_at)
 
     bot.send_message(
         message.chat.id,
