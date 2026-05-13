@@ -95,41 +95,36 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     html = html.replace("{{TICKET_NUMBER}}", generate_ticket_number(payment_dt))
     html = html.replace("{{PRICE}}",         "53")
 
-    # Заменяем встроенный скрипт шаблона на наш рабочий таймер
-    # (оригинальный скрипт ищет {{T_PAY}} который уже заменён — таймер не работал)
-    timer_script_inline = f"""
-    // Живой таймер — считает секунды с момента оплаты
-    (function() {{
-      var paymentUnix = {payment_unix};
-      function pad(n) {{ return n < 10 ? '0' + n : '' + n; }}
-      function tick() {{
-        var total = Math.max(0, Math.floor(Date.now() / 1000) - paymentUnix);
-        var h = Math.floor(total / 3600);
-        var m = Math.floor((total % 3600) / 60);
-        var s = total % 60;
-        var text = (h > 0 ? pad(h) + ':' : '') + pad(m) + ':' + pad(s);
-        // Ищем все <strong> и обновляем тот у которого текст похож на таймер MM:SS
-        var strongs = document.querySelectorAll('strong');
-        strongs.forEach(function(el) {{
-          if (/^\d{{2}}:\d{{2}}/.test(el.textContent.trim())) {{
-            el.textContent = text;
-          }}
-        }});
-      }}
-      tick();
-      setInterval(tick, 1000);
-    }})();
-    """
-    # Находим существующий <script> в шаблоне и заменяем его содержимое
-    import re as _re
-    html = _re.sub(r'(<script[^>]*>).*?(</script>)', r'' + timer_script_inline + r'', html, count=1, flags=_re.DOTALL)
-
-    # Адаптивный QR-код (SingleFile хардкодит 1880×1880px)
+    # Адаптивный QR-код
     html = html.replace(
         'style="height:1880px;width:1880px;',
         'style="width:100%;max-width:100vw;height:auto;display:block;',
     )
 
+    # Заменяем содержимое <script> на рабочий таймер (через find/slice, без re)
+    sc_open  = "<script>"
+    sc_close = "</script>"
+    si = html.find(sc_open)
+    ei = html.find(sc_close, si)
+    if si != -1 and ei != -1:
+        timer_js = (
+            "\n(function() {\n"
+            "  var p = " + str(payment_unix) + ";\n"
+            "  function pad(n){return n<10?'0'+n:''+n;}\n"
+            "  function tick(){\n"
+            "    var t=Math.max(0,Math.floor(Date.now()/1000)-p);\n"
+            "    var h=Math.floor(t/3600);\n"
+            "    var m=Math.floor((t%3600)/60);\n"
+            "    var s=t%60;\n"
+            "    var txt=(h>0?pad(h)+':':'')+pad(m)+':'+pad(s);\n"
+            "    document.querySelectorAll('strong').forEach(function(el){\n"
+            "      if(/^\\d{2}:/.test(el.textContent.trim())){el.textContent=txt;}\n"
+            "    });\n"
+            "  }\n"
+            "  tick();setInterval(tick,1000);\n"
+            "})();\n"
+        )
+        html = html[:si + len(sc_open)] + timer_js + html[ei:]
 
     return html.encode("utf-8")
 
