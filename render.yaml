@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: telegram-ticket-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn "bot:flask_app" --bind "0.0.0.0:$PORT" --workers 1 --threads 4 --timeout 60
+    healthCheckPath: /healthz
+    envVars:
+      - key: BOT_TOKEN
+        sync: false          # значение вводится вручную в Render Dashboard
+      - key: RENDER_URL
+        sync: false          # значение вводится вручную в Render Dashboard
+ 
