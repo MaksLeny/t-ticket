@@ -190,6 +190,23 @@ def check_admin(message: types.Message) -> bool:
         return False
     return True
 
+
+def notify_admins_about_unauthorized_start(message: types.Message) -> None:
+    username = message.from_user.username or "—"
+    name = f"{message.from_user.first_name or '—'} {message.from_user.last_name or ''}".strip()
+    text = (
+        "⚠️ Внимание! Неавторизованный пользователь попытался запустить бота:\n"
+        f"user_id: `{message.from_user.id}`\n"
+        f"username: @{username}\n"
+        f"имя: {name}\n"
+        f"сообщение: `{message.text or '—'}`"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, text, parse_mode="Markdown")
+        except Exception as e:
+            log.warning("Не удалось уведомить админа %s: %s", admin_id, e)
+
 # =============================================================================
 # ХРАНИЛИЩЕ СОСТОЯНИЙ
 # =============================================================================
@@ -357,7 +374,11 @@ def _send_ticket(
 @bot.message_handler(commands=["start"])
 def handle_start(message: types.Message):
     try:
-        if not check_access(message): return
+        if not is_allowed(message.from_user.id):
+            notify_admins_about_unauthorized_start(message)
+            bot.send_message(message.chat.id, "⛔ У вас нет доступа к этому боту.")
+            return
+
         reset_state(message.from_user.id)
         get_user(message.from_user.id, message.from_user)
         log_event(message.from_user, "/start")
