@@ -210,10 +210,15 @@ def get_all_users_info():
 
 
 # Инициализируем БД при запуске
-if DATABASE_URL:
-    init_db()
-else:
-    logger.warning("⚠️ DATABASE_URL не задана, работаем без БД")
+try:
+    if DATABASE_URL:
+        init_db()
+    else:
+        logger.warning("⚠️ DATABASE_URL не задана, работаем без БД")
+except Exception as e:
+    logger.error(f"❌ Ошибка инициализации БД при запуске: {e}")
+    print(f"❌ Ошибка инициализации БД: {e}")
+    raise  # Критично для production
 
 # =============================================================================
 # FLASK + БОТ
@@ -950,14 +955,22 @@ def handle_add_fav_callback(call: types.CallbackQuery):
 # =============================================================================
 
 def setup_webhook():
-    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_url)
-    print(f"✅ Webhook установлен: {webhook_url}")
+    try:
+        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
+        print(f"✅ Webhook установлен: {webhook_url}")
+    except Exception as e:
+        print(f"❌ Ошибка установки webhook: {e}")
+        raise  # Перевыбрасываем, чтобы gunicorn увидел ошибку
 
 
 # Вызываем при импорте — gunicorn не запускает __main__
-setup_webhook()
+try:
+    setup_webhook()
+except Exception as e:
+    print(f"❌ Критическая ошибка при запуске: {e}")
+    raise
 
 
 if __name__ == "__main__":
