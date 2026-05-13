@@ -525,7 +525,7 @@ def handle_about(message: types.Message):
         if not check_access(message): return
         about_text = (
             "ℹ️ *О боте*\n\n"
-            "🤖 *Telegram Ticket Bot*\n"
+            "🤖 *Транспорт Плюс*\n"
             "Простой и быстрый инструмент для генерации уведомлений об оплате проезда.\n\n"
             "✨ *Возможности:*\n"
             "• Генерация QR-кодов и билетов за одну секунду\n"
