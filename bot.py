@@ -48,6 +48,15 @@ def _require_env(name: str) -> str:
 
 BOT_TOKEN     = _require_env("BOT_TOKEN")
 RENDER_URL    = _require_env("RENDER_URL")
+# GitHub API — нужны для персистентного whitelist.
+# GITHUB_TOKEN  — Personal Access Token (classic), scope: repo
+# GITHUB_OWNER  — твой GitHub username (например: maksleny)
+# GITHUB_REPO   — название репозитория (например: t-ticket)
+# GITHUB_BRANCH — ветка (обычно: main)
+GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_OWNER  = os.environ.get("GITHUB_OWNER", "")
+GITHUB_REPO   = os.environ.get("GITHUB_REPO", "")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
 MSK           = timezone(timedelta(hours=3))
 
@@ -67,40 +76,163 @@ USER_IDS: set[int] = {
 }
 
 # =============================================================================
-# ДИНАМИЧЕСКОЕ УПРАВЛЕНИЕ ДОСТУПОМ — пользователи добавляются командой /allow
-# Файл allowed_users.json хранит список одобренных пользователей
-# ВАЖНО: на GitHub добавить в .gitignore файл allowed_users.json
-# На Render.com этот файл будет сохраняться локально (но исчезнет при рестарте)
-# Если нужна персистентность, используй Redis или переменные окружения
+# ДИНАМИЧЕСКИЙ WHITELIST — персистентный через GitHub
+#
+# Как это работает:
+#   /allow <id>  →  бот добавляет id в USER_IDS прямо в bot.py на GitHub
+#                   через GitHub Contents API (PUT /contents/bot.py).
+#   /deny  <id>  →  бот удаляет id из USER_IDS в bot.py на GitHub.
+#   Render автоматически передёплоивает сервис при пуше в репо
+#   (если настроен Auto-Deploy) — изменения вступают в силу сразу.
+#   Даже без авто-деплоя изменения переживают рестарт: при следующем
+#   деплое Render возьмёт актуальный bot.py с GitHub.
+#
+# Переменные окружения (задать в Render Dashboard):
+#   GITHUB_TOKEN  — Personal Access Token, scope: repo
+#   GITHUB_OWNER  — твой GitHub username
+#   GITHUB_REPO   — название репозитория
+#   GITHUB_BRANCH — ветка (обычно main)
 # =============================================================================
 
-ALLOWED_USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allowed_users.json")
-dynamic_allowed_users: set[int] = set()
+dynamic_allowed_users: set[int] = set()   # runtime-кэш (актуален до рестарта)
 
-def _load_allowed_users() -> None:
-    """Загружает список динамически одобренных пользователей из JSON-файла."""
-    global dynamic_allowed_users
-    if os.path.exists(ALLOWED_USERS_FILE):
-        try:
-            with open(ALLOWED_USERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                dynamic_allowed_users = set(data.get("users", []))
-                log.info("Загружено %d динамически одобренных пользователей", len(dynamic_allowed_users))
-        except Exception as e:
-            log.warning("Ошибка при загрузке allowed_users.json: %s", e)
-            dynamic_allowed_users = set()
-    else:
-        dynamic_allowed_users = set()
 
-def _save_allowed_users() -> None:
-    """Сохраняет список одобренных пользователей в JSON-файл."""
+def _github_get_bot_py() -> tuple[str, str]:
+    """
+    Читает bot.py из GitHub репозитория.
+    Возвращает (содержимое_файла, sha) — sha нужен для последующего PUT.
+    Бросает RuntimeError если GitHub API недоступен или токен не задан.
+    """
+    import http.client, base64, urllib.parse
+    if not all([GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO]):
+        raise RuntimeError(
+            "GitHub не настроен. Задай GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO "
+            "в переменных окружения Render."
+        )
+    path = f"/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/bot.py"
+    if GITHUB_BRANCH != "main":
+        path += f"?ref={urllib.parse.quote(GITHUB_BRANCH)}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept":        "application/vnd.github+json",
+        "User-Agent":    "TelegramTicketBot/4.0",
+    }
+    conn = http.client.HTTPSConnection("api.github.com")
     try:
-        with open(ALLOWED_USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"users": sorted(list(dynamic_allowed_users))}, f, indent=2)
-    except Exception as e:
-        log.warning("Ошибка при сохранении allowed_users.json: %s", e)
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+    finally:
+        conn.close()
+    if resp.status != 200:
+        raise RuntimeError(f"GitHub GET bot.py → HTTP {resp.status}: {body[:200].decode('utf-8','replace')}")
+    import json as _json
+    data    = _json.loads(body)
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    sha     = data["sha"]
+    return content, sha
 
-_load_allowed_users()
+
+def _github_put_bot_py(content: str, sha: str, commit_msg: str) -> None:
+    """
+    Пушит обновлённый bot.py в GitHub репозиторий.
+    content — полное содержимое файла (строка).
+    sha     — текущий SHA файла (получен из _github_get_bot_py).
+    """
+    import http.client, base64, json as _json, urllib.parse
+    path = f"/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/bot.py"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept":        "application/vnd.github+json",
+        "Content-Type":  "application/json",
+        "User-Agent":    "TelegramTicketBot/4.0",
+    }
+    body_data = _json.dumps({
+        "message": commit_msg,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "sha":     sha,
+        "branch":  GITHUB_BRANCH,
+    }, ensure_ascii=True).encode("utf-8")
+    conn = http.client.HTTPSConnection("api.github.com")
+    try:
+        conn.request("PUT", path, body=body_data,
+                     headers={**headers, "Content-Length": str(len(body_data))})
+        resp = conn.getresponse()
+        body = resp.read()
+    finally:
+        conn.close()
+    if resp.status not in (200, 201):
+        raise RuntimeError(f"GitHub PUT bot.py → HTTP {resp.status}: {body[:200].decode('utf-8','replace')}")
+
+
+def _whitelist_add(user_id: int) -> None:
+    """
+    Добавляет user_id в USER_IDS в bot.py на GitHub.
+    Алгоритм:
+      1. Читаем bot.py с GitHub.
+      2. Находим строку USER_IDS: set[int] = { ... } и вставляем новый id.
+      3. Пушим изменённый файл обратно.
+      4. Обновляем runtime-кэш dynamic_allowed_users.
+    """
+    import re
+    content, sha = _github_get_bot_py()
+
+    # Ищем блок USER_IDS = { ... }  (может занимать несколько строк)
+    pattern = r'(USER_IDS\s*:\s*set\[int\]\s*=\s*\{)([^}]*)(\})'
+    m = re.search(pattern, content, re.DOTALL)
+    if not m:
+        raise RuntimeError("Не найден блок USER_IDS в bot.py. Проверь формат файла.")
+
+    block_inner = m.group(2)  # всё что внутри { ... }
+
+    # Проверяем, нет ли уже такого id
+    if re.search(rf'\b{user_id}\b', block_inner):
+        dynamic_allowed_users.add(user_id)
+        return  # уже есть
+
+    # Добавляем новую строку перед закрывающей скобкой
+    new_line = f"\n    {user_id},"
+    new_block = m.group(1) + block_inner.rstrip() + new_line + "\n" + m.group(3)
+    content   = content[:m.start()] + new_block + content[m.end():]
+
+    _github_put_bot_py(content, sha, f"whitelist: add {user_id}")
+    dynamic_allowed_users.add(user_id)
+    log.info("whitelist: добавлен %s", user_id)
+
+
+def _whitelist_remove(user_id: int) -> None:
+    """
+    Удаляет user_id из USER_IDS в bot.py на GitHub.
+    """
+    import re
+    content, sha = _github_get_bot_py()
+
+    pattern = r'(USER_IDS\s*:\s*set\[int\]\s*=\s*\{)([^}]*)(\})'
+    m = re.search(pattern, content, re.DOTALL)
+    if not m:
+        raise RuntimeError("Не найден блок USER_IDS в bot.py.")
+
+    block_inner = m.group(2)
+
+    if not re.search(rf'\b{user_id}\b', block_inner):
+        dynamic_allowed_users.discard(user_id)
+        return  # и так нет
+
+    # Удаляем строку с этим id (с опциональным комментарием)
+    block_inner = re.sub(
+        rf'[ \t]*{user_id}[,]?[ \t]*(#[^\n]*)?\n?',
+        '',
+        block_inner,
+    )
+    new_block = m.group(1) + block_inner + m.group(3)
+    content   = content[:m.start()] + new_block + content[m.end():]
+
+    _github_put_bot_py(content, sha, f"whitelist: remove {user_id}")
+    dynamic_allowed_users.discard(user_id)
+    log.info("whitelist: удалён %s", user_id)
+
+
+
 
 # =============================================================================
 # FLASK + БОТ
@@ -898,15 +1030,23 @@ def handle_allow(message: types.Message):
             bot.send_message(message.chat.id, f"⚠️ Пользователь `{user_id}` уже админ.", parse_mode="Markdown")
             return
         
-        if user_id in dynamic_allowed_users:
+        if user_id in dynamic_allowed_users or user_id in USER_IDS:
             bot.send_message(message.chat.id, f"⚠️ Пользователь `{user_id}` уже в списке разрешённых.", parse_mode="Markdown")
             return
-        
-        dynamic_allowed_users.add(user_id)
-        _save_allowed_users()
+
+        wait = bot.send_message(message.chat.id, "⏳ Обновляю whitelist на GitHub...")
+        try:
+            _whitelist_add(user_id)
+        except RuntimeError as e:
+            bot.edit_message_text(f"❌ Ошибка GitHub:\n{e}", message.chat.id, wait.message_id)
+            return
         log_event(message.from_user, f"разрешил доступ {user_id}")
-        
-        bot.send_message(message.chat.id, f"✅ Пользователь `{user_id}` добавлен в список разрешённых.", parse_mode="Markdown")
+        bot.edit_message_text(
+            f"✅ Пользователь `{user_id}` добавлен.\n\n"
+            f"Изменение сохранено в bot.py на GitHub и переживёт любой рестарт Render.\n"
+            f"Если включён Auto-Deploy — сервис передеплоится автоматически.",
+            message.chat.id, wait.message_id, parse_mode="Markdown",
+        )
         log.info("Добавлен пользователь %s админом %s", user_id, message.from_user.id)
     except Exception as e:
         log.exception("Ошибка в handle_allow")
@@ -937,15 +1077,22 @@ def handle_deny(message: types.Message):
             bot.send_message(message.chat.id, "❌ Нельзя удалить админа.", parse_mode="Markdown")
             return
         
-        if user_id not in dynamic_allowed_users:
-            bot.send_message(message.chat.id, f"⚠️ Пользователь `{user_id}` не в списке разрешённых.", parse_mode="Markdown")
+        if user_id not in dynamic_allowed_users and user_id not in USER_IDS:
+            bot.send_message(message.chat.id, f"⚠️ Пользователь `{user_id}` не в USER_IDS.", parse_mode="Markdown")
             return
-        
-        dynamic_allowed_users.discard(user_id)
-        _save_allowed_users()
+
+        wait = bot.send_message(message.chat.id, "⏳ Обновляю whitelist на GitHub...")
+        try:
+            _whitelist_remove(user_id)
+        except RuntimeError as e:
+            bot.edit_message_text(f"❌ Ошибка GitHub:\n{e}", message.chat.id, wait.message_id)
+            return
         log_event(message.from_user, f"запретил доступ {user_id}")
-        
-        bot.send_message(message.chat.id, f"✅ Пользователь `{user_id}` удалён из списка разрешённых.", parse_mode="Markdown")
+        bot.edit_message_text(
+            f"✅ Пользователь `{user_id}` удалён.\n\n"
+            f"Изменение сохранено в bot.py на GitHub.",
+            message.chat.id, wait.message_id, parse_mode="Markdown",
+        )
         log.info("Удалён пользователь %s админом %s", user_id, message.from_user.id)
     except Exception as e:
         log.exception("Ошибка в handle_deny")
