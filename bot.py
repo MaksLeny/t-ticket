@@ -17,40 +17,20 @@ import os
 import random
 import string
 import uuid
-import logging
 from datetime import datetime, timezone, timedelta
 
 import telebot
 from telebot import types
 from flask import Flask, abort, request as flask_request
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import pickle
-
-# Логирование
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # =============================================================================
 # КОНФИГУРАЦИЯ
 # =============================================================================
 
-try:
-    BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
-    RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
-    TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
-    MSK           = timezone(timedelta(hours=3))
-    DATABASE_URL  = os.environ.get("DATABASE_URL")  # PostgreSQL URL из Render
-    
-    # ВРЕМЕННО ОТКЛЮЧАЕМ БД
-    USE_DATABASE = False  # Изменить на True когда БД будет готова
-    
-    logger.info("✅ Конфигурация загружена")
-    print("✅ Конфигурация загружена")
-except KeyError as e:
-    logger.error(f"❌ Отсутствует переменная окружения: {e}")
-    print(f"❌ Отсутствует переменная окружения: {e}")
-    raise
+BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
+RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
+MSK           = timezone(timedelta(hours=3))
 
 # =============================================================================
 # WHITELIST — список Telegram user_id которым разрешено пользоваться ботом.
@@ -62,204 +42,11 @@ WHITELIST: set[int] = {
 }
 
 # =============================================================================
-# БАЗА ДАННЫХ
-# =============================================================================
-
-def init_db():
-    """Инициализация PostgreSQL таблиц."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Таблица пользователей
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_ticket BYTEA,
-                favorites BYTEA,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Таблица билетов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tickets (
-                token TEXT PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                route TEXT,
-                vehicle TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                expires_at DOUBLE PRECISION
-            )
-        """)
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        logger.info("✅ PostgreSQL база инициализирована")
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации БД: {e}")
-
-
-def get_db_connection():
-    """Получить соединение с PostgreSQL."""
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-
-def save_user_data(user_id: int, username: str, first_name: str, last_ticket, favorites):
-    """Сохранить/обновить пользователя."""
-    if not USE_DATABASE:
-        return
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO users (user_id, username, first_name, last_ticket, favorites, last_activity)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) DO UPDATE SET
-                username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name,
-                last_ticket = EXCLUDED.last_ticket,
-                favorites = EXCLUDED.favorites,
-                last_activity = CURRENT_TIMESTAMP
-        """, (user_id, username, first_name, 
-              psycopg2.Binary(pickle.dumps(last_ticket)) if last_ticket else None,
-              psycopg2.Binary(pickle.dumps(favorites)) if favorites else None))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        logger.info(f"💾 Сохранён юзер {user_id}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения юзера: {e}")
-
-
-def load_user_data(user_id: int):
-    """Загрузить данные пользователя."""
-    if not USE_DATABASE:
-        return None, []
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "SELECT last_ticket, favorites FROM users WHERE user_id = %s",
-            (user_id,)
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
-        if row:
-            return (pickle.loads(row['last_ticket']) if row['last_ticket'] else None,
-                    pickle.loads(row['favorites']) if row['favorites'] else [])
-        return None, []
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки юзера: {e}")
-        return None, []
-
-
-def save_ticket(token: str, user_id: int, route: str, vehicle: str, expires_at: float):
-    """Сохранить билет в БД."""
-    if not USE_DATABASE:
-        return
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO tickets (token, user_id, route, vehicle, expires_at)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (token, user_id, route, vehicle, expires_at))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        logger.info(f"🎫 Билет {token[:8]} сохранён")
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения билета: {e}")
-
-
-def get_user_stats(user_id: int = None):
-    """Получить статистику."""
-    if not USE_DATABASE:
-        return 0
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        if user_id:
-            cursor.execute("SELECT COUNT(*) FROM tickets WHERE user_id = %s", (user_id,))
-        else:
-            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM users")
-        
-        result = cursor.fetchone()['count']
-        cursor.close()
-        conn.close()
-        return result
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения статистики: {e}")
-        return 0
-
-
-def get_all_users_info():
-    """Получить инфо о всех пользователях."""
-    if not USE_DATABASE:
-        return []
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT user_id, username, first_name, created_at, 
-                   (SELECT COUNT(*) FROM tickets WHERE tickets.user_id = users.user_id) as ticket_count
-            FROM users
-            ORDER BY last_activity DESC
-        """)
-        
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return rows
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения всех юзеров: {e}")
-        return []
-
-
-# Инициализируем БД при запуске
-try:
-    if USE_DATABASE and DATABASE_URL:
-        init_db()
-    else:
-        logger.warning("⚠️ База данных отключена или не настроена")
-        print("⚠️ База данных отключена или не настроена")
-except Exception as e:
-    logger.error(f"❌ Ошибка инициализации БД при запуске: {e}")
-    print(f"❌ Ошибка инициализации БД: {e}")
-    raise  # Критично для production
-
-# =============================================================================
 # FLASK + БОТ
 # =============================================================================
 
-try:
-    flask_app = Flask(__name__)
-    bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
-    logger.info("✅ Flask и бот инициализированы")
-    print("✅ Flask и бот инициализированы")
-except Exception as e:
-    logger.error(f"❌ Ошибка инициализации Flask/бота: {e}")
-    print(f"❌ Ошибка инициализации Flask/бота: {e}")
-    raise
+flask_app = Flask(__name__)
+bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
 # Хранилище HTML-билетов: token → (html_bytes, expires_at)
 # expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
@@ -340,7 +127,7 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     if si != -1 and ei != -1:
         timer_js = (
             "\n(function() {\n"
-            "  var p = " + str(payment_unix - 23) + ";\n"
+            "  var p = " + str(payment_unix) + ";\n"
             "  function pad(n){return n<10?'0'+n:''+n;}\n"
             "  function tick(){\n"
             "    var t=Math.max(0,Math.floor(Date.now()/1000)-p);\n"
@@ -366,21 +153,6 @@ def is_allowed(user_id: int) -> bool:
     return user_id in WHITELIST
 
 
-def validate_route(route: str) -> bool:
-    """Валидация маршрута: 1-10 символов, буквы/цифры/кириллица."""
-    if not (1 <= len(route) <= 10):
-        return False
-    # Разрешены: буквы (любые), цифры, символ '-' и 'А'-'Я'
-    return all(c.isalnum() or c in '-' for c in route)
-
-
-def validate_vehicle(vehicle: str) -> bool:
-    """Валидация номера ТС: 1-10 символов, буквы/цифры."""
-    if not (1 <= len(vehicle) <= 10):
-        return False
-    return all(c.isalnum() for c in vehicle)
-
-
 def check_access(message: types.Message) -> bool:
     """
     Проверяет доступ. Если пользователя нет в whitelist —
@@ -403,11 +175,9 @@ user_data: dict[int, dict] = {}
 
 def get_user(uid: int) -> dict:
     if uid not in user_data:
-        # Пробуем загрузить из БД
-        last_ticket, favorites = load_user_data(uid)
         user_data[uid] = {
-            "last":         last_ticket,
-            "favorites":    favorites,
+            "last":         None,   # (route, vehicle)
+            "favorites":    [],     # [route, ...]
             "state":        None,
             "payment_unix": None,
         }
@@ -425,10 +195,6 @@ def main_keyboard() -> types.ReplyKeyboardMarkup:
         types.KeyboardButton("🔁 Повторить последний"),
         types.KeyboardButton("⭐ Избранное"),
     )
-    kb.row(
-        types.KeyboardButton("📋 Справка"),
-        types.KeyboardButton("ℹ️ О боте"),
-    )
     return kb
 
 
@@ -445,24 +211,14 @@ def ticket_keyboard(token: str, route: str) -> types.InlineKeyboardMarkup:
     return kb
 
 
-def favorites_keyboard(favorites: list, edit_mode: bool = False) -> types.InlineKeyboardMarkup:
+def favorites_keyboard(favorites: list) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
     for i, route in enumerate(favorites):
-        if edit_mode:
-            kb.add(types.InlineKeyboardButton(
-                text=f"❌ №{route}",
-                callback_data=f"remove_fav:{i}",
-            ))
-        else:
-            kb.add(types.InlineKeyboardButton(
-                text=f"№{route}",
-                callback_data=f"fav:{i}",
-            ))
-    if edit_mode:
-        kb.add(types.InlineKeyboardButton("◀️ Назад", callback_data="fav:back"))
-    else:
-        kb.add(types.InlineKeyboardButton("✏️ Редактировать", callback_data="fav:edit"))
-        kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="fav:close"))
+        kb.add(types.InlineKeyboardButton(
+            text=f"№{route}",
+            callback_data=f"fav:{i}",
+        ))
+    kb.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="fav:close"))
     return kb
 
 
@@ -508,7 +264,6 @@ def _send_ticket(
         html_bytes = build_html(route, vehicle, payment_unix)
     except FileNotFoundError:
         bot.send_message(message.chat.id, "❌ Файл template.html не найден.")
-        logger.error("❌ template.html не найден")
         return
 
     # Чистим устаревшие билеты перед добавлением нового
@@ -518,16 +273,6 @@ def _send_ticket(
     # Билет живёт 1 час (3600 секунд) с момента генерации
     expires_at = datetime.now(timezone.utc).timestamp() + 3600
     ticket_store[token] = (html_bytes, expires_at)
-    
-    # Сохраняем в БД
-    save_ticket(token, message.from_user.id, route, vehicle, expires_at)
-    save_user_data(
-        message.from_user.id, 
-        message.from_user.username or "unknown",
-        message.from_user.first_name or "unknown",
-        user["last"],
-        user["favorites"]
-    )
 
     bot.send_message(
         message.chat.id,
@@ -535,201 +280,43 @@ def _send_ticket(
         parse_mode="Markdown",
         reply_markup=ticket_keyboard(token, route),
     )
-    
-    logger.info(f"🎫 Билет создан для юзера {message.from_user.id}: {route} {vehicle}")
 
 
 # =============================================================================
 # ОБРАБОТЧИКИ БОТА
 # =============================================================================
 
-@bot.message_handler(commands=["start"])
+@bot.message_handler(commands=["start", "help"])
 def handle_start(message: types.Message):
-    try:
-        if not check_access(message): return
-        user = get_user(message.from_user.id)
-        
-        # Сохраняем пользователя в БД при первом обращении
-        save_user_data(
-            message.from_user.id,
-            message.from_user.username or "unknown",
-            message.from_user.first_name or "unknown",
-            user["last"],
-            user["favorites"]
-        )
-        logger.info(f"👤 Новый пользователь (или возврат): {message.from_user.id}")
-        
-        welcome_text = (
-            "👋 *Привет, добро пожаловать!*\n\n"
-            "Я помогаю быстро генерировать уведомления об оплате проезда.\n\n"
-            "💡 *Что я умею:*\n"
-            "• Создавать билеты за секунду\n"
-            "• Сохранять избранные маршруты\n"
-            "• Повторно использовать последний билет\n\n"
-            "Выбери действие ниже или используй /help для подробной справки."
-        )
-        bot.send_message(
-            message.chat.id,
-            welcome_text,
-            parse_mode="Markdown",
-            reply_markup=main_keyboard(),
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка в handle_start: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка инициализации бота.")
-        except:
-            pass
-
-
-@bot.message_handler(commands=["help"])
-def handle_help(message: types.Message):
-    try:
-        if not check_access(message): return
-        help_text = (
-            "📚 *Справка по боту*\n\n"
-            "*Основные команды:*\n"
-            "🎫 *Новый билет* — создать билет (нужны маршрут и номер ТС)\n"
-            "🔁 *Повторить последний* — быстро создать билет с теми же данными\n"
-            "⭐ *Избранное* — управление сохранённными маршрутами\n\n"
-            "*Примеры использования:*\n"
-            "• Введи: `10А 1140`\n"
-            "• После генерации жми «⭐ В избранное» для сохранения\n"
-            "• В избранном можно отредактировать номер ТС\n\n"
-            "*Технические детали:*\n"
-            "• Билет действует 1 час с момента создания\n"
-            "• Используй /status для информации о текущем билете\n"
-        )
-        
-        # Для админа добавляем команду /admin
-        if list(WHITELIST)[0] == message.from_user.id:
-            help_text += "\n*Команды администратора:*\n/admin — открыть админ-панель"
-        
-        bot.send_message(
-            message.chat.id,
-            help_text,
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка в handle_help: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка при выводе справки.")
-        except:
-            pass
-
-
-@bot.message_handler(commands=["admin"])
-def handle_admin(message: types.Message):
-    try:
-        # Только для владельца
-        if not is_allowed(message.from_user.id) or list(WHITELIST)[0] != message.from_user.id:
-            bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
-            logger.warning(f"❌ Попытка доступа к /admin от {message.from_user.id}")
-            return
-        
-        # Получаем статистику
-        total_users = len(get_all_users_info())
-        total_tickets = get_user_stats()
-        
-        admin_text = (
-            "📊 *АДМИН ПАНЕЛЬ*\n\n"
-            f"👥 *Всего пользователей:* {total_users}\n"
-            f"🎫 *Всего билетов:* {total_tickets}\n\n"
-            "*Последние пользователи:*\n"
-        )
-        
-        users = get_all_users_info()[:10]  # Последние 10 юзеров
-        if users:
-            for user_id, username, first_name, created_at, ticket_count in users:
-                username_str = f"@{username}" if username else "unknown"
-                admin_text += f"\n• ID: `{user_id}`\n  Имя: {first_name} {username_str}\n  Билетов: {ticket_count}"
-        else:
-            admin_text += "\n(Нет пользователей)"
-        
-        bot.send_message(
-            message.chat.id,
-            admin_text,
-            parse_mode="Markdown",
-        )
-        logger.info(f"📊 Админ {message.from_user.id} открыл панель")
-    except Exception as e:
-        logger.error(f"❌ Ошибка в handle_admin: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка при загрузке админ-панели.")
-        except:
-            pass
-
-
-@bot.message_handler(commands=["status"])
-def handle_status(message: types.Message):
-    try:
-        if not check_access(message): return
-        user = get_user(message.from_user.id)
-        
-        status_lines = ["📊 *Ваша информация:*\n"]
-        
-        if user["last"]:
-            route, vehicle = user["last"]
-            status_lines.append(f"🚌 Последний билет: №{route} · ТС {vehicle}")
-        else:
-            status_lines.append("🚌 Последний билет: не создан")
-        
-        if user["favorites"]:
-            status_lines.append(f"⭐ Избранные маршруты: {', '.join(f'№{r}' for r in user['favorites'])}")
-        else:
-            status_lines.append("⭐ Избранные маршруты: нет")
-        
-        active_count = sum(1 for _, (_, exp) in ticket_store.items() 
-                           if datetime.now(timezone.utc).timestamp() <= exp)
-        status_lines.append(f"🎫 Активные билеты в системе: {active_count}")
-        
-        bot.send_message(
-            message.chat.id,
-            "\n".join(status_lines),
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        print(f"❌ Ошибка в handle_status: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка при получении статуса.")
-        except:
-            pass
+    if not check_access(message): return
+    get_user(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        "👋 Привет! Я генерирую уведомления об оплате проезда.\n\nВыбери действие:",
+        reply_markup=main_keyboard(),
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == "🎫 Новый билет")
 def handle_new_ticket(message: types.Message):
-    try:
-        if not check_access(message): return
-        get_user(message.from_user.id)["state"] = "awaiting_input"
-        bot.send_message(
-            message.chat.id,
-            "Введи *маршрут* и *номер ТС* через пробел.\n\nПример: `10А 1140`",
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        print(f"❌ Ошибка в handle_new_ticket: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка инициализации.")
-        except:
-            pass
+    if not check_access(message): return
+    get_user(message.from_user.id)["state"] = "awaiting_input"
+    bot.send_message(
+        message.chat.id,
+        "Введи *маршрут* и *номер ТС* через пробел.\n\nПример: `10А 1140`",
+        parse_mode="Markdown",
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == "🔁 Повторить последний")
 def handle_repeat_last(message: types.Message):
-    try:
-        if not check_access(message): return
-        user = get_user(message.from_user.id)
-        if not user["last"]:
-            bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
-            return
-        route, vehicle = user["last"]
-        _send_ticket(message, route, vehicle)
-    except Exception as e:
-        print(f"❌ Ошибка в handle_repeat_last: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка при повторении билета.")
-        except:
-            pass
+    if not check_access(message): return
+    user = get_user(message.from_user.id)
+    if not user["last"]:
+        bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
+        return
+    route, vehicle = user["last"]
+    _send_ticket(message, route, vehicle)
 
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Избранное")
@@ -744,244 +331,89 @@ def handle_favorites(message: types.Message):
         return
     bot.send_message(
         message.chat.id,
-        f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
+        "⭐ *Избранные маршруты:*",
         parse_mode="Markdown",
-        reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
+        reply_markup=favorites_keyboard(user["favorites"]),
     )
-
-
-@bot.message_handler(func=lambda m: m.text == "📋 Справка")
-def handle_help_button(message: types.Message):
-    try:
-        if not check_access(message): return
-        handle_help(message)
-    except Exception as e:
-        print(f"❌ Ошибка в handle_help_button: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка при открытии справки.")
-        except:
-            pass
-
-
-@bot.message_handler(func=lambda m: m.text == "ℹ️ О боте")
-def handle_about(message: types.Message):
-    try:
-        if not check_access(message): return
-        about_text = (
-            "ℹ️ *О боте*\n\n"
-            "🤖 *Telegram Ticket Bot*\n"
-            "Простой и быстрый инструмент для генерации уведомлений об оплате проезда.\n\n"
-            "✨ *Возможности:*\n"
-            "• Генерация QR-кодов и билетов за одну секунду\n"
-            "• Сохранение избранных маршрутов\n"
-            "• Автоматический таймер с момента оплаты\n"
-            "• Безопасное хранилище (1 час)\n\n"
-            "🔐 *Безопасность:*\n"
-            "• Доступ только авторизованным пользователям\n"
-            "• Билеты автоматически удаляются через час\n\n"
-            "Введи /help для подробной справки."
-        )
-        bot.send_message(
-            message.chat.id,
-            about_text,
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        print(f"❌ Ошибка в handle_about: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка при открытии информации о боте.")
-        except:
-            pass
 
 
 @bot.message_handler(func=lambda m: get_user(m.from_user.id).get("state") == "awaiting_input")
 def handle_input(message: types.Message):
-    try:
-        if not check_access(message): return
-        user = get_user(message.from_user.id)
-        parts = message.text.strip().split()
-        if len(parts) != 2:
-            bot.send_message(
-                message.chat.id,
-                "❌ Неверный формат. Введи ровно два значения через пробел.\nПример: `10А 1140`",
-                parse_mode="Markdown",
-            )
-            return
-        
-        route, vehicle = parts[0].upper(), parts[1].upper()
-        
-        # Валидация
-        if not validate_route(route):
-            bot.send_message(
-                message.chat.id,
-                "❌ Маршрут некорректен. Используй 1-10 символов (буквы/цифры/-).\nПример: `10А` или `5-З`",
-                parse_mode="Markdown",
-            )
-            logger.warning(f"❌ Невалидный маршрут от {message.from_user.id}: {route}")
-            return
-        
-        if not validate_vehicle(vehicle):
-            bot.send_message(
-                message.chat.id,
-                "❌ Номер ТС некорректен. Используй 1-10 символов (буквы/цифры).\nПример: `1140`",
-                parse_mode="Markdown",
-            )
-            logger.warning(f"❌ Невалидный ТС от {message.from_user.id}: {vehicle}")
-            return
-        
-        user["state"] = None
-        _send_ticket(message, route, vehicle, is_new_ticket=True)
-    except Exception as e:
-        logger.error(f"❌ Ошибка в handle_input: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
-        except:
-            pass
+    if not check_access(message): return
+    user = get_user(message.from_user.id)
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        bot.send_message(
+            message.chat.id,
+            "❌ Неверный формат. Введи ровно два значения через пробел.\nПример: `10А 1140`",
+            parse_mode="Markdown",
+        )
+        return
+    user["state"] = None
+    route, vehicle = parts[0].upper(), parts[1]
+    _send_ticket(message, route, vehicle, is_new_ticket=True)
 
 
 @bot.message_handler(
     func=lambda m: str(get_user(m.from_user.id).get("state", "")).startswith("awaiting_vehicle:")
 )
 def handle_vehicle_input(message: types.Message):
-    try:
-        if not check_access(message): return
-        user  = get_user(message.from_user.id)
-        route = user["state"].split(":", 1)[1]
-        user["state"] = None
-        _send_ticket(
-            message, route, message.text.strip(),
-            msg_date_override=int(datetime.now(timezone.utc).timestamp()),
-        )
-    except Exception as e:
-        print(f"❌ Ошибка в handle_vehicle_input: {e}")
-        try:
-            bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
-        except:
-            pass
+    if not check_access(message): return
+    user  = get_user(message.from_user.id)
+    route = user["state"].split(":", 1)[1]
+    user["state"] = None
+    _send_ticket(
+        message, route, message.text.strip(),
+        msg_date_override=int(datetime.now(timezone.utc).timestamp()),
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav:"))
 def handle_fav_callback(call: types.CallbackQuery):
-    try:
-        user    = get_user(call.from_user.id)
-        payload = call.data[4:]
+    user    = get_user(call.from_user.id)
+    payload = call.data[4:]
 
-        if payload == "close":
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.answer_callback_query(call.id)
-            return
-        
-        if payload == "edit":
-            bot.edit_message_text(
-                f"⭐ *Редактирование избранного ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут для удаления:",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
-            )
-            bot.answer_callback_query(call.id)
-            return
-        
-        if payload == "back":
-            bot.edit_message_text(
-                f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
-            )
-            bot.answer_callback_query(call.id)
-            return
-
-        idx = int(payload)
-        if idx >= len(user["favorites"]):
-            bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
-            return
-
-        route = user["favorites"][idx]
-        bot.answer_callback_query(call.id)
+    if payload == "close":
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        user["state"] = f"awaiting_vehicle:{route}"
-        bot.send_message(
-            call.message.chat.id,
-            f"Маршрут №*{route}* выбран.\nВведи номер ТС:",
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        print(f"❌ Ошибка в handle_fav_callback: {e}")
-        try:
-            bot.answer_callback_query(call.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
-        except:
-            pass
+        bot.answer_callback_query(call.id)
+        return
 
+    idx = int(payload)
+    if idx >= len(user["favorites"]):
+        bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
+        return
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("remove_fav:"))
-def handle_remove_fav_callback(call: types.CallbackQuery):
-    try:
-        user = get_user(call.from_user.id)
-        idx = int(call.data[11:])
-        if idx >= len(user["favorites"]):
-            bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
-            return
-        
-        removed_route = user["favorites"].pop(idx)
-        bot.answer_callback_query(call.id, f"✅ Маршрут №{removed_route} удалён из избранного!")
-        
-        if not user["favorites"]:
-            bot.edit_message_text(
-                "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
-                call.message.chat.id,
-                call.message.message_id,
-            )
-        else:
-            bot.edit_message_text(
-                f"⭐ *Редактирование избранного ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут для удаления:",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
-            )
-    except (ValueError, IndexError):
-        print(f"❌ Ошибка парсинга индекса в handle_remove_fav_callback")
-        try:
-            bot.answer_callback_query(call.id, "⚠️ Ошибка при удалении.")
-        except:
-            pass
-    except Exception as e:
-        print(f"❌ Ошибка в handle_remove_fav_callback: {e}")
-        try:
-            bot.answer_callback_query(call.id, "⚠️ Ошибка обработки.")
-        except:
-            pass
+    route = user["favorites"][idx]
+    bot.answer_callback_query(call.id)
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    user["state"] = f"awaiting_vehicle:{route}"
+    bot.send_message(
+        call.message.chat.id,
+        f"Маршрут №*{route}* выбран.\nВведи номер ТС:",
+        parse_mode="Markdown",
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_fav:"))
 def handle_add_fav_callback(call: types.CallbackQuery):
+    user  = get_user(call.from_user.id)
+    route = call.data[8:]
+
+    if route in user["favorites"]:
+        bot.answer_callback_query(call.id, "⭐ Уже в избранном!")
+        return
+
+    user["favorites"].append(route)
+    bot.answer_callback_query(call.id, f"✅ Маршрут №{route} добавлен в избранное!")
+
     try:
-        user  = get_user(call.from_user.id)
-        route = call.data[8:]
-
-        if route in user["favorites"]:
-            bot.answer_callback_query(call.id, "⭐ Уже в избранном!")
-            return
-
-        user["favorites"].append(route)
-        bot.answer_callback_query(call.id, f"✅ Маршрут №{route} добавлен в избранное!")
-
-        try:
-            bot.edit_message_reply_markup(
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=types.InlineKeyboardMarkup(),
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"❌ Ошибка в handle_add_fav_callback: {e}")
-        try:
-            bot.answer_callback_query(call.id, "⚠️ Ошибка добавления в избранное.")
-        except:
-            pass
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup(),
+        )
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -989,24 +421,14 @@ def handle_add_fav_callback(call: types.CallbackQuery):
 # =============================================================================
 
 def setup_webhook():
-    try:
-        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-        bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"✅ Webhook установлен: {webhook_url}")
-        print(f"✅ Webhook установлен: {webhook_url}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки webhook: {e}")
-        print(f"❌ Ошибка установки webhook: {e}")
-        raise  # Перевыбрасываем, чтобы gunicorn увидел ошибку
+    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    bot.remove_webhook()
+    bot.set_webhook(url=webhook_url)
+    print(f"✅ Webhook установлен: {webhook_url}")
 
 
 # Вызываем при импорте — gunicorn не запускает __main__
-try:
-    setup_webhook()
-except Exception as e:
-    print(f"❌ Критическая ошибка при запуске: {e}")
-    raise
+setup_webhook()
 
 
 if __name__ == "__main__":
