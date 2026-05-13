@@ -35,11 +35,18 @@ logger = logging.getLogger(__name__)
 # КОНФИГУРАЦИЯ
 # =============================================================================
 
-BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
-RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
-TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
-MSK           = timezone(timedelta(hours=3))
-DATABASE_URL  = os.environ.get("DATABASE_URL")  # PostgreSQL URL из Render
+try:
+    BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
+    RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
+    TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
+    MSK           = timezone(timedelta(hours=3))
+    DATABASE_URL  = os.environ.get("DATABASE_URL")  # PostgreSQL URL из Render
+    logger.info("✅ Конфигурация загружена")
+    print("✅ Конфигурация загружена")
+except KeyError as e:
+    logger.error(f"❌ Отсутствует переменная окружения: {e}")
+    print(f"❌ Отсутствует переменная окружения: {e}")
+    raise
 
 # =============================================================================
 # WHITELIST — список Telegram user_id которым разрешено пользоваться ботом.
@@ -215,6 +222,7 @@ try:
         init_db()
     else:
         logger.warning("⚠️ DATABASE_URL не задана, работаем без БД")
+        print("⚠️ DATABASE_URL не задана, работаем без БД")
 except Exception as e:
     logger.error(f"❌ Ошибка инициализации БД при запуске: {e}")
     print(f"❌ Ошибка инициализации БД: {e}")
@@ -224,8 +232,15 @@ except Exception as e:
 # FLASK + БОТ
 # =============================================================================
 
-flask_app = Flask(__name__)
-bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
+try:
+    flask_app = Flask(__name__)
+    bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
+    logger.info("✅ Flask и бот инициализированы")
+    print("✅ Flask и бот инициализированы")
+except Exception as e:
+    logger.error(f"❌ Ошибка инициализации Flask/бота: {e}")
+    print(f"❌ Ошибка инициализации Flask/бота: {e}")
+    raise
 
 # Хранилище HTML-билетов: token → (html_bytes, expires_at)
 # expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
@@ -959,8 +974,10 @@ def setup_webhook():
         webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
         bot.remove_webhook()
         bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Webhook установлен: {webhook_url}")
         print(f"✅ Webhook установлен: {webhook_url}")
     except Exception as e:
+        logger.error(f"❌ Ошибка установки webhook: {e}")
         print(f"❌ Ошибка установки webhook: {e}")
         raise  # Перевыбрасываем, чтобы gunicorn увидел ошибку
 
