@@ -41,6 +41,10 @@ try:
     TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
     MSK           = timezone(timedelta(hours=3))
     DATABASE_URL  = os.environ.get("DATABASE_URL")  # PostgreSQL URL из Render
+    
+    # ВРЕМЕННО ОТКЛЮЧАЕМ БД
+    USE_DATABASE = False  # Изменить на True когда БД будет готова
+    
     logger.info("✅ Конфигурация загружена")
     print("✅ Конфигурация загружена")
 except KeyError as e:
@@ -107,6 +111,9 @@ def get_db_connection():
 
 def save_user_data(user_id: int, username: str, first_name: str, last_ticket, favorites):
     """Сохранить/обновить пользователя."""
+    if not USE_DATABASE:
+        return
+    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -134,6 +141,9 @@ def save_user_data(user_id: int, username: str, first_name: str, last_ticket, fa
 
 def load_user_data(user_id: int):
     """Загрузить данные пользователя."""
+    if not USE_DATABASE:
+        return None, []
+    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -157,6 +167,9 @@ def load_user_data(user_id: int):
 
 def save_ticket(token: str, user_id: int, route: str, vehicle: str, expires_at: float):
     """Сохранить билет в БД."""
+    if not USE_DATABASE:
+        return
+    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -176,6 +189,9 @@ def save_ticket(token: str, user_id: int, route: str, vehicle: str, expires_at: 
 
 def get_user_stats(user_id: int = None):
     """Получить статистику."""
+    if not USE_DATABASE:
+        return 0
+    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -196,6 +212,9 @@ def get_user_stats(user_id: int = None):
 
 def get_all_users_info():
     """Получить инфо о всех пользователях."""
+    if not USE_DATABASE:
+        return []
+    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -218,11 +237,11 @@ def get_all_users_info():
 
 # Инициализируем БД при запуске
 try:
-    if DATABASE_URL:
+    if USE_DATABASE and DATABASE_URL:
         init_db()
     else:
-        logger.warning("⚠️ DATABASE_URL не задана, работаем без БД")
-        print("⚠️ DATABASE_URL не задана, работаем без БД")
+        logger.warning("⚠️ База данных отключена или не настроена")
+        print("⚠️ База данных отключена или не настроена")
 except Exception as e:
     logger.error(f"❌ Ошибка инициализации БД при запуске: {e}")
     print(f"❌ Ошибка инициализации БД: {e}")
