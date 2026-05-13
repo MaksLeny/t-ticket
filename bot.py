@@ -17,11 +17,19 @@ import os
 import random
 import string
 import uuid
+import logging
 from datetime import datetime, timezone, timedelta
 
 import telebot
 from telebot import types
 from flask import Flask, abort, request as flask_request
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import pickle
+
+# Логирование
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # КОНФИГУРАЦИЯ
@@ -31,6 +39,7 @@ BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environm
 RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
 MSK           = timezone(timedelta(hours=3))
+DATABASE_URL  = os.environ.get("DATABASE_URL")  # PostgreSQL URL из Render
 
 # =============================================================================
 # WHITELIST — список Telegram user_id которым разрешено пользоваться ботом.
@@ -40,6 +49,171 @@ MSK           = timezone(timedelta(hours=3))
 WHITELIST: set[int] = {
     2021457397,   # владелец бота
 }
+
+# =============================================================================
+# БАЗА ДАННЫХ
+# =============================================================================
+
+def init_db():
+    """Инициализация PostgreSQL таблиц."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Таблица пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_ticket BYTEA,
+                favorites BYTEA,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_activity TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица билетов
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tickets (
+                token TEXT PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                route TEXT,
+                vehicle TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                expires_at DOUBLE PRECISION
+            )
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("✅ PostgreSQL база инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
+
+
+def get_db_connection():
+    """Получить соединение с PostgreSQL."""
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+
+def save_user_data(user_id: int, username: str, first_name: str, last_ticket, favorites):
+    """Сохранить/обновить пользователя."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO users (user_id, username, first_name, last_ticket, favorites, last_activity)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_ticket = EXCLUDED.last_ticket,
+                favorites = EXCLUDED.favorites,
+                last_activity = CURRENT_TIMESTAMP
+        """, (user_id, username, first_name, 
+              psycopg2.Binary(pickle.dumps(last_ticket)) if last_ticket else None,
+              psycopg2.Binary(pickle.dumps(favorites)) if favorites else None))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info(f"💾 Сохранён юзер {user_id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения юзера: {e}")
+
+
+def load_user_data(user_id: int):
+    """Загрузить данные пользователя."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT last_ticket, favorites FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row:
+            return (pickle.loads(row['last_ticket']) if row['last_ticket'] else None,
+                    pickle.loads(row['favorites']) if row['favorites'] else [])
+        return None, []
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки юзера: {e}")
+        return None, []
+
+
+def save_ticket(token: str, user_id: int, route: str, vehicle: str, expires_at: float):
+    """Сохранить билет в БД."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO tickets (token, user_id, route, vehicle, expires_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (token, user_id, route, vehicle, expires_at))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info(f"🎫 Билет {token[:8]} сохранён")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения билета: {e}")
+
+
+def get_user_stats(user_id: int = None):
+    """Получить статистику."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if user_id:
+            cursor.execute("SELECT COUNT(*) FROM tickets WHERE user_id = %s", (user_id,))
+        else:
+            cursor.execute("SELECT COUNT(DISTINCT user_id) FROM users")
+        
+        result = cursor.fetchone()['count']
+        cursor.close()
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики: {e}")
+        return 0
+
+
+def get_all_users_info():
+    """Получить инфо о всех пользователях."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, username, first_name, created_at, 
+                   (SELECT COUNT(*) FROM tickets WHERE tickets.user_id = users.user_id) as ticket_count
+            FROM users
+            ORDER BY last_activity DESC
+        """)
+        
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения всех юзеров: {e}")
+        return []
+
+
+# Инициализируем БД при запуске
+if DATABASE_URL:
+    init_db()
+else:
+    logger.warning("⚠️ DATABASE_URL не задана, работаем без БД")
 
 # =============================================================================
 # FLASK + БОТ
@@ -153,6 +327,21 @@ def is_allowed(user_id: int) -> bool:
     return user_id in WHITELIST
 
 
+def validate_route(route: str) -> bool:
+    """Валидация маршрута: 1-10 символов, буквы/цифры/кириллица."""
+    if not (1 <= len(route) <= 10):
+        return False
+    # Разрешены: буквы (любые), цифры, символ '-' и 'А'-'Я'
+    return all(c.isalnum() or c in '-' for c in route)
+
+
+def validate_vehicle(vehicle: str) -> bool:
+    """Валидация номера ТС: 1-10 символов, буквы/цифры."""
+    if not (1 <= len(vehicle) <= 10):
+        return False
+    return all(c.isalnum() for c in vehicle)
+
+
 def check_access(message: types.Message) -> bool:
     """
     Проверяет доступ. Если пользователя нет в whitelist —
@@ -175,9 +364,11 @@ user_data: dict[int, dict] = {}
 
 def get_user(uid: int) -> dict:
     if uid not in user_data:
+        # Пробуем загрузить из БД
+        last_ticket, favorites = load_user_data(uid)
         user_data[uid] = {
-            "last":         None,   # (route, vehicle)
-            "favorites":    [],     # [route, ...]
+            "last":         last_ticket,
+            "favorites":    favorites,
             "state":        None,
             "payment_unix": None,
         }
@@ -278,6 +469,7 @@ def _send_ticket(
         html_bytes = build_html(route, vehicle, payment_unix)
     except FileNotFoundError:
         bot.send_message(message.chat.id, "❌ Файл template.html не найден.")
+        logger.error("❌ template.html не найден")
         return
 
     # Чистим устаревшие билеты перед добавлением нового
@@ -287,6 +479,16 @@ def _send_ticket(
     # Билет живёт 1 час (3600 секунд) с момента генерации
     expires_at = datetime.now(timezone.utc).timestamp() + 3600
     ticket_store[token] = (html_bytes, expires_at)
+    
+    # Сохраняем в БД
+    save_ticket(token, message.from_user.id, route, vehicle, expires_at)
+    save_user_data(
+        message.from_user.id, 
+        message.from_user.username or "unknown",
+        message.from_user.first_name or "unknown",
+        user["last"],
+        user["favorites"]
+    )
 
     bot.send_message(
         message.chat.id,
@@ -294,6 +496,8 @@ def _send_ticket(
         parse_mode="Markdown",
         reply_markup=ticket_keyboard(token, route),
     )
+    
+    logger.info(f"🎫 Билет создан для юзера {message.from_user.id}: {route} {vehicle}")
 
 
 # =============================================================================
@@ -304,7 +508,18 @@ def _send_ticket(
 def handle_start(message: types.Message):
     try:
         if not check_access(message): return
-        get_user(message.from_user.id)
+        user = get_user(message.from_user.id)
+        
+        # Сохраняем пользователя в БД при первом обращении
+        save_user_data(
+            message.from_user.id,
+            message.from_user.username or "unknown",
+            message.from_user.first_name or "unknown",
+            user["last"],
+            user["favorites"]
+        )
+        logger.info(f"👤 Новый пользователь (или возврат): {message.from_user.id}")
+        
         welcome_text = (
             "👋 *Привет, добро пожаловать!*\n\n"
             "Я помогаю быстро генерировать уведомления об оплате проезда.\n\n"
@@ -321,7 +536,7 @@ def handle_start(message: types.Message):
             reply_markup=main_keyboard(),
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_start: {e}")
+        logger.error(f"❌ Ошибка в handle_start: {e}")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка инициализации бота.")
         except:
@@ -346,15 +561,62 @@ def handle_help(message: types.Message):
             "• Билет действует 1 час с момента создания\n"
             "• Используй /status для информации о текущем билете\n"
         )
+        
+        # Для админа добавляем команду /admin
+        if list(WHITELIST)[0] == message.from_user.id:
+            help_text += "\n*Команды администратора:*\n/admin — открыть админ-панель"
+        
         bot.send_message(
             message.chat.id,
             help_text,
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_help: {e}")
+        logger.error(f"❌ Ошибка в handle_help: {e}")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка при выводе справки.")
+        except:
+            pass
+
+
+@bot.message_handler(commands=["admin"])
+def handle_admin(message: types.Message):
+    try:
+        # Только для владельца
+        if not is_allowed(message.from_user.id) or list(WHITELIST)[0] != message.from_user.id:
+            bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
+            logger.warning(f"❌ Попытка доступа к /admin от {message.from_user.id}")
+            return
+        
+        # Получаем статистику
+        total_users = len(get_all_users_info())
+        total_tickets = get_user_stats()
+        
+        admin_text = (
+            "📊 *АДМИН ПАНЕЛЬ*\n\n"
+            f"👥 *Всего пользователей:* {total_users}\n"
+            f"🎫 *Всего билетов:* {total_tickets}\n\n"
+            "*Последние пользователи:*\n"
+        )
+        
+        users = get_all_users_info()[:10]  # Последние 10 юзеров
+        if users:
+            for user_id, username, first_name, created_at, ticket_count in users:
+                username_str = f"@{username}" if username else "unknown"
+                admin_text += f"\n• ID: `{user_id}`\n  Имя: {first_name} {username_str}\n  Билетов: {ticket_count}"
+        else:
+            admin_text += "\n(Нет пользователей)"
+        
+        bot.send_message(
+            message.chat.id,
+            admin_text,
+            parse_mode="Markdown",
+        )
+        logger.info(f"📊 Админ {message.from_user.id} открыл панель")
+    except Exception as e:
+        logger.error(f"❌ Ошибка в handle_admin: {e}")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при загрузке админ-панели.")
         except:
             pass
 
@@ -506,11 +768,32 @@ def handle_input(message: types.Message):
                 parse_mode="Markdown",
             )
             return
+        
+        route, vehicle = parts[0].upper(), parts[1].upper()
+        
+        # Валидация
+        if not validate_route(route):
+            bot.send_message(
+                message.chat.id,
+                "❌ Маршрут некорректен. Используй 1-10 символов (буквы/цифры/-).\nПример: `10А` или `5-З`",
+                parse_mode="Markdown",
+            )
+            logger.warning(f"❌ Невалидный маршрут от {message.from_user.id}: {route}")
+            return
+        
+        if not validate_vehicle(vehicle):
+            bot.send_message(
+                message.chat.id,
+                "❌ Номер ТС некорректен. Используй 1-10 символов (буквы/цифры).\nПример: `1140`",
+                parse_mode="Markdown",
+            )
+            logger.warning(f"❌ Невалидный ТС от {message.from_user.id}: {vehicle}")
+            return
+        
         user["state"] = None
-        route, vehicle = parts[0].upper(), parts[1]
         _send_ticket(message, route, vehicle, is_new_ticket=True)
     except Exception as e:
-        print(f"❌ Ошибка в handle_input: {e}")
+        logger.error(f"❌ Ошибка в handle_input: {e}")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
         except:
