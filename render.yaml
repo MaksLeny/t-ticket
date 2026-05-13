@@ -7,7 +7,19 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: BOT_TOKEN
-        sync: false          # значение вводится вручную в Render Dashboard
+        sync: false          # токен бота от @BotFather
       - key: RENDER_URL
-        sync: false          # значение вводится вручную в Render Dashboard
- 
+        sync: false          # публичный URL сервиса, напр. https://my-bot.onrender.com
+
+      # ── GitHub API (для персистентного whitelist) ─────────────────────────
+      # Получить токен: GitHub → Settings → Developer settings
+      #   → Personal access tokens → Tokens (classic)
+      #   → Generate new token → отметь scope "repo" → Generate
+      - key: GITHUB_TOKEN
+        sync: false          # ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      - key: GITHUB_OWNER
+        sync: false          # твой GitHub username, напр. maksleny
+      - key: GITHUB_REPO
+        sync: false          # название репозитория, напр. t-ticket
+      - key: GITHUB_BRANCH
+        value: main          # ветка (менять не нужно если используешь main)
