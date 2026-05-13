@@ -29,7 +29,10 @@ from flask import Flask, abort, request as flask_request
 
 BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
 RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "template.html")
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
+print(f"📁 TEMPLATE_PATH = {TEMPLATE_PATH}")
+print(f"📁 Файл существует: {os.path.exists(TEMPLATE_PATH)}")
+print(f"📁 Рабочая директория: {os.getcwd()}")
 MSK           = timezone(timedelta(hours=3))
 
 # =============================================================================
