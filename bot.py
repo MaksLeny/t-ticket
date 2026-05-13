@@ -14,6 +14,7 @@ Telegram-бот для генерации билетов об оплате пр�
 """
 
 import os
+import logging
 import random
 import string
 import uuid
@@ -24,12 +25,32 @@ from telebot import types
 from flask import Flask, abort, request as flask_request
 
 # =============================================================================
-# КОНФИГУРАЦИЯ
+# ЛОГИРОВАНИЕ
 # =============================================================================
 
-BOT_TOKEN     = os.environ["BOT_TOKEN"]    # задать в Render → Environment
-RENDER_URL    = os.environ["RENDER_URL"]   # напр. https://my-bot.onrender.com
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("ticket-bot")
+
+# =============================================================================
+# КОНФИГУРАЦИЯ — проверка переменных окружения при старте
+# =============================================================================
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        log.critical("❌ Переменная окружения '%s' не задана. Задай её в Render → Environment.", name)
+        raise SystemExit(1)
+    return value
+
+BOT_TOKEN     = _require_env("BOT_TOKEN")   # задать в Render → Environment
+RENDER_URL    = _require_env("RENDER_URL")  # напр. https://my-bot.onrender.com
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
+
+log.info("✅ Конфигурация загружена. RENDER_URL=%s", RENDER_URL)
 MSK           = timezone(timedelta(hours=3))
 
 # =============================================================================
@@ -188,11 +209,6 @@ def get_user(uid: int) -> dict:
 # КЛАВИАТУРЫ
 # =============================================================================
 
-def reset_state(uid: int) -> None:
-    """Сбрасывает текущее состояние пользователя."""
-    get_user(uid)["state"] = None
-
-
 def main_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(types.KeyboardButton("🎫 Новый билет"))
@@ -309,7 +325,6 @@ def _send_ticket(
 def handle_start(message: types.Message):
     try:
         if not check_access(message): return
-        reset_state(message.from_user.id)
         get_user(message.from_user.id)
         welcome_text = (
             "👋 *Привет, добро пожаловать!*\n\n"
@@ -327,7 +342,7 @@ def handle_start(message: types.Message):
             reply_markup=main_keyboard(),
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_start: {e}")
+        log.exception("Ошибка в handle_start")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка инициализации бота.")
         except:
@@ -338,7 +353,6 @@ def handle_start(message: types.Message):
 def handle_help(message: types.Message):
     try:
         if not check_access(message): return
-        reset_state(message.from_user.id)
         help_text = (
             "📚 *Справка по боту*\n\n"
             "*Основные команды:*\n"
@@ -359,7 +373,7 @@ def handle_help(message: types.Message):
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_help: {e}")
+        log.exception("Ошибка в handle_help")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка при выводе справки.")
         except:
@@ -370,9 +384,8 @@ def handle_help(message: types.Message):
 def handle_status(message: types.Message):
     try:
         if not check_access(message): return
-        reset_state(message.from_user.id)
         user = get_user(message.from_user.id)
-
+        
         status_lines = ["📊 *Ваша информация:*\n"]
         
         if user["last"]:
@@ -396,29 +409,11 @@ def handle_status(message: types.Message):
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_status: {e}")
+        log.exception("Ошибка в handle_status")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка при получении статуса.")
         except:
             pass
-
-
-@bot.message_handler(commands=["cancel"])
-def handle_cancel(message: types.Message):
-    try:
-        if not check_access(message): return
-        user = get_user(message.from_user.id)
-        if user["state"] is None:
-            bot.send_message(message.chat.id, "Нет активного действия для отмены.")
-            return
-        reset_state(message.from_user.id)
-        bot.send_message(
-            message.chat.id,
-            "❌ Действие отменено. Выбери что сделать дальше:",
-            reply_markup=main_keyboard(),
-        )
-    except Exception as e:
-        print(f"❌ Ошибка в handle_cancel: {e}")
 
 
 @bot.message_handler(func=lambda m: m.text == "🎫 Новый билет")
@@ -432,7 +427,7 @@ def handle_new_ticket(message: types.Message):
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_new_ticket: {e}")
+        log.exception("Ошибка в handle_new_ticket")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка инициализации.")
         except:
@@ -443,7 +438,6 @@ def handle_new_ticket(message: types.Message):
 def handle_repeat_last(message: types.Message):
     try:
         if not check_access(message): return
-        reset_state(message.from_user.id)
         user = get_user(message.from_user.id)
         if not user["last"]:
             bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
@@ -451,7 +445,7 @@ def handle_repeat_last(message: types.Message):
         route, vehicle = user["last"]
         _send_ticket(message, route, vehicle)
     except Exception as e:
-        print(f"❌ Ошибка в handle_repeat_last: {e}")
+        log.exception("Ошибка в handle_repeat_last")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка при повторении билета.")
         except:
@@ -461,7 +455,6 @@ def handle_repeat_last(message: types.Message):
 @bot.message_handler(func=lambda m: m.text == "⭐ Избранное")
 def handle_favorites(message: types.Message):
     if not check_access(message): return
-    reset_state(message.from_user.id)
     user = get_user(message.from_user.id)
     if not user["favorites"]:
         bot.send_message(
@@ -483,7 +476,7 @@ def handle_help_button(message: types.Message):
         if not check_access(message): return
         handle_help(message)
     except Exception as e:
-        print(f"❌ Ошибка в handle_help_button: {e}")
+        log.exception("Ошибка в handle_help_button")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка при открытии справки.")
         except:
@@ -494,7 +487,6 @@ def handle_help_button(message: types.Message):
 def handle_about(message: types.Message):
     try:
         if not check_access(message): return
-        reset_state(message.from_user.id)
         about_text = (
             "ℹ️ *О боте*\n\n"
             "🤖 *Telegram Ticket Bot*\n"
@@ -515,7 +507,7 @@ def handle_about(message: types.Message):
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_about: {e}")
+        log.exception("Ошибка в handle_about")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка при открытии информации о боте.")
         except:
@@ -539,7 +531,7 @@ def handle_input(message: types.Message):
         route, vehicle = parts[0].upper(), parts[1]
         _send_ticket(message, route, vehicle, is_new_ticket=True)
     except Exception as e:
-        print(f"❌ Ошибка в handle_input: {e}")
+        log.exception("Ошибка в handle_input")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
         except:
@@ -560,7 +552,7 @@ def handle_vehicle_input(message: types.Message):
             msg_date_override=int(datetime.now(timezone.utc).timestamp()),
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_vehicle_input: {e}")
+        log.exception("Ошибка в handle_vehicle_input")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
         except:
@@ -615,7 +607,7 @@ def handle_fav_callback(call: types.CallbackQuery):
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"❌ Ошибка в handle_fav_callback: {e}")
+        log.exception("Ошибка в handle_fav_callback")
         try:
             bot.answer_callback_query(call.id, "⚠️ Ошибка обработки. Попробуй ещё раз.")
         except:
@@ -649,13 +641,13 @@ def handle_remove_fav_callback(call: types.CallbackQuery):
                 reply_markup=favorites_keyboard(user["favorites"], edit_mode=True),
             )
     except (ValueError, IndexError):
-        print(f"❌ Ошибка парсинга индекса в handle_remove_fav_callback")
+        log.exception("Ошибка парсинга индекса в handle_remove_fav_callback")
         try:
             bot.answer_callback_query(call.id, "⚠️ Ошибка при удалении.")
         except:
             pass
     except Exception as e:
-        print(f"❌ Ошибка в handle_remove_fav_callback: {e}")
+        log.exception("Ошибка в handle_remove_fav_callback")
         try:
             bot.answer_callback_query(call.id, "⚠️ Ошибка обработки.")
         except:
@@ -684,7 +676,7 @@ def handle_add_fav_callback(call: types.CallbackQuery):
         except Exception:
             pass
     except Exception as e:
-        print(f"❌ Ошибка в handle_add_fav_callback: {e}")
+        log.exception("Ошибка в handle_add_fav_callback")
         try:
             bot.answer_callback_query(call.id, "⚠️ Ошибка добавления в избранное.")
         except:
@@ -699,7 +691,7 @@ def setup_webhook():
     webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
     bot.remove_webhook()
     bot.set_webhook(url=webhook_url)
-    print(f"✅ Webhook установлен: {webhook_url}")
+    log.info("✅ Webhook установлен: %s", webhook_url)
 
 
 # Вызываем при импорте — gunicorn не запускает __main__
@@ -708,5 +700,5 @@ setup_webhook()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🚀 Сервер запущен на порту {port}")
+    log.info("🚀 Сервер запущен на порту %s", port)
     flask_app.run(host="0.0.0.0", port=port)
