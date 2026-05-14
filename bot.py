@@ -94,12 +94,13 @@ def _gh_available() -> bool:
     return bool(GITHUB_TOKEN and GITHUB_OWNER and GITHUB_REPO)
 
 
-def _gh_get_raw(path: str) -> tuple[str | None, str | None]:
+def _gh_get_raw(path: str, _retries: int = 3, _delay: float = 3.0) -> tuple[str | None, str | None]:
     """
     Читает файл из репозитория как текст.
     Возвращает (содержимое, sha) или (None, None) при ошибке/404.
+    При сетевых ошибках повторяет до _retries раз с паузой _delay секунд.
     """
-    import http.client, base64 as _b64, urllib.parse as _up
+    import http.client, base64 as _b64, urllib.parse as _up, time as _time
     if not _gh_available():
         return None, None
     encoded  = _up.quote(path, safe="/")
@@ -111,29 +112,48 @@ def _gh_get_raw(path: str) -> tuple[str | None, str | None]:
         "Accept":        "application/vnd.github+json",
         "User-Agent":    "TelegramTicketBot/4.0",
     }
-    conn = http.client.HTTPSConnection("api.github.com", timeout=10)
-    try:
-        conn.request("GET", url_path, headers=headers)
-        resp = conn.getresponse()
-        body = resp.read()
-    finally:
-        conn.close()
-    if resp.status == 404:
-        return None, None
-    if resp.status != 200:
+    last_exc = None
+    for attempt in range(1, _retries + 1):
+        conn = http.client.HTTPSConnection("api.github.com", timeout=10)
+        try:
+            conn.request("GET", url_path, headers=headers)
+            resp = conn.getresponse()
+            body = resp.read()
+        except Exception as exc:
+            last_exc = exc
+            log.warning("GitHub GET %s — попытка %d/%d, ошибка: %s", path, attempt, _retries, exc)
+            conn.close()
+            if attempt < _retries:
+                _time.sleep(_delay)
+            continue
+        finally:
+            conn.close()
+        if resp.status == 404:
+            return None, None
+        if resp.status == 200:
+            meta = json.loads(body)
+            return _b64.b64decode(meta["content"]).decode("utf-8"), meta["sha"]
+        # 5xx — серверная ошибка GitHub, имеет смысл повторить
+        if resp.status >= 500 and attempt < _retries:
+            log.warning("GitHub GET %s -> HTTP %s — попытка %d/%d, повтор через %.0f сек",
+                        path, resp.status, attempt, _retries, _delay)
+            _time.sleep(_delay)
+            continue
         log.warning("GitHub GET %s -> HTTP %s", path, resp.status)
         return None, None
-    meta = json.loads(body)
-    return _b64.b64decode(meta["content"]).decode("utf-8"), meta["sha"]
+    log.error("GitHub GET %s — все %d попытки исчерпаны. Последняя ошибка: %s", path, _retries, last_exc)
+    return None, None
 
 
-def _gh_put_raw(path: str, text_content: str, sha: str | None, commit_msg: str) -> bool:
+def _gh_put_raw(path: str, text_content: str, sha: str | None, commit_msg: str,
+                _retries: int = 3, _delay: float = 3.0) -> bool:
     """
     Записывает текстовый файл в репозиторий.
     sha=None — создание нового файла.
     Возвращает True при успехе.
+    При сетевых ошибках и 5xx повторяет до _retries раз с паузой _delay секунд.
     """
-    import http.client, base64 as _b64, urllib.parse as _up
+    import http.client, base64 as _b64, urllib.parse as _up, time as _time
     if not _gh_available():
         return False
     encoded   = _up.quote(path, safe="/")
@@ -154,17 +174,33 @@ def _gh_put_raw(path: str, text_content: str, sha: str | None, commit_msg: str) 
         "Content-Length": str(len(body_data)),
         "User-Agent":     "TelegramTicketBot/4.0",
     }
-    conn = http.client.HTTPSConnection("api.github.com", timeout=15)
-    try:
-        conn.request("PUT", url_path, body=body_data, headers=headers)
-        resp = conn.getresponse()
-        resp.read()
-    finally:
-        conn.close()
-    if resp.status not in (200, 201):
+    last_exc = None
+    for attempt in range(1, _retries + 1):
+        conn = http.client.HTTPSConnection("api.github.com", timeout=15)
+        try:
+            conn.request("PUT", url_path, body=body_data, headers=headers)
+            resp = conn.getresponse()
+            resp.read()
+        except Exception as exc:
+            last_exc = exc
+            log.warning("GitHub PUT %s — попытка %d/%d, ошибка: %s", path, attempt, _retries, exc)
+            conn.close()
+            if attempt < _retries:
+                _time.sleep(_delay)
+            continue
+        finally:
+            conn.close()
+        if resp.status in (200, 201):
+            return True
+        if resp.status >= 500 and attempt < _retries:
+            log.warning("GitHub PUT %s -> HTTP %s — попытка %d/%d, повтор через %.0f сек",
+                        path, resp.status, attempt, _retries, _delay)
+            _time.sleep(_delay)
+            continue
         log.warning("GitHub PUT %s -> HTTP %s", path, resp.status)
         return False
-    return True
+    log.error("GitHub PUT %s — все %d попытки исчерпаны. Последняя ошибка: %s", path, _retries, last_exc)
+    return False
 
 
 # =============================================================================
@@ -387,6 +423,44 @@ def generate_ticket_serial() -> str:
 
 def generate_ticket_number(dt: datetime) -> str:
     return dt.strftime("%Y%m%d%H%M%S") + "".join(random.choices(string.digits, k=3))
+
+
+def normalize_input(raw: str) -> tuple[str, str] | None:
+    """
+    Нормализует ввод пользователя: "10а 1140", "10 А 1140", "10А  1140" → ("10А", "1140")
+    Возвращает (route, vehicle) или None если формат не распознан.
+    Логика:
+      • убираем лишние пробелы
+      • склеиваем цифровую часть маршрута с буквенным суффиксом если они разбиты пробелом
+        (напр. "10 А 1140" → токены ["10","А","1140"] → маршрут "10А", ТС "1140")
+      • маршрут приводим к верхнему регистру
+    """
+    import re as _re
+    tokens = raw.strip().split()
+    if not tokens:
+        return None
+
+    # Случай 1: ровно 2 токена — стандартный ввод "10А 1140"
+    if len(tokens) == 2:
+        route_raw, vehicle = tokens
+        # Маршрут может быть написан маленькими: "10а" → "10А"
+        route = route_raw.upper()
+        return route, vehicle
+
+    # Случай 2: 3 токена — маршрут разбит: "10 А 1140" или "10А 11 40" (опечатка в ТС)
+    if len(tokens) == 3:
+        # Если первый токен — цифры, второй — буква(ы), третий — номер ТС
+        if _re.fullmatch(r"\d+", tokens[0]) and _re.fullmatch(r"[A-Za-zА-Яа-яЁё]+", tokens[1]):
+            route = (tokens[0] + tokens[1]).upper()
+            vehicle = tokens[2]
+            return route, vehicle
+        # Если первый токен — маршрут (цифры+буквы), второй и третий — части ТС
+        if _re.fullmatch(r"[0-9]+[A-Za-zА-Яа-яЁё]*", tokens[0]):
+            route = tokens[0].upper()
+            vehicle = tokens[1] + tokens[2]
+            return route, vehicle
+
+    return None
 
 
 def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
@@ -841,16 +915,25 @@ def handle_input(message: types.Message):
     try:
         if not check_access(message): return
         user = get_user(message.from_user.id, message.from_user)
-        parts = message.text.strip().split()
-        if len(parts) != 2:
+        parsed = normalize_input(message.text)
+        if parsed is None:
             bot.send_message(
                 message.chat.id,
-                "❌ Неверный формат. Введи ровно два значения через пробел.\nПример: `10А 1140`",
+                "❌ Неверный формат. Введи маршрут и номер ТС через пробел.\nПример: `10А 1140`",
                 parse_mode="Markdown",
             )
             return
+        route, vehicle = parsed
+        # Если ввод был в нестандартном формате — показываем что поняли
+        normalized_text = f"{route} {vehicle}"
+        original_text   = message.text.strip()
         user["state"] = None
-        route, vehicle = parts[0].upper(), parts[1]
+        if normalized_text.replace(" ", "").lower() != original_text.replace(" ", "").lower():
+            bot.send_message(
+                message.chat.id,
+                f"✏️ Автокоррекция: `{original_text}` → `{normalized_text}`",
+                parse_mode="Markdown",
+            )
         _send_ticket(message, route, vehicle, is_new_ticket=True)
     except Exception as e:
         log.exception("Ошибка в handle_input")
@@ -985,6 +1068,15 @@ def handle_add_fav_callback(call: types.CallbackQuery):
 
         if route in user["favorites"]:
             bot.answer_callback_query(call.id, "⭐ Уже в избранном!")
+            return
+
+        FAV_LIMIT = 5
+        if len(user["favorites"]) >= FAV_LIMIT:
+            bot.answer_callback_query(
+                call.id,
+                f"⛔ Лимит избранного: максимум {FAV_LIMIT} маршрутов. Удали лишний и попробуй снова.",
+                show_alert=True,
+            )
             return
 
         user["favorites"].append(route)
