@@ -48,6 +48,9 @@ def _require_env(name: str) -> str:
 
 BOT_TOKEN     = _require_env("BOT_TOKEN")
 RENDER_URL    = _require_env("RENDER_URL")
+# Юзернейм бота (без @) — нужен для кнопки "Перейти в бота" в меню Mini App.
+# Задай в Render → Environment: BOT_USERNAME=твой_бот
+BOT_USERNAME  = os.environ.get("BOT_USERNAME", "")
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
 
 # GitHub API — для персистентного user_data и whitelist.
@@ -614,9 +617,13 @@ def main_keyboard() -> types.ReplyKeyboardMarkup:
 
 def ticket_keyboard(token: str, route: str) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
+    # bot_username — добавляет кнопку "Перейти в бота" в меню ⋮ Mini App
+    wa_kwargs = {"url": f"{RENDER_URL}/ticket/{token}", "is_fullscreen": True}
+    if BOT_USERNAME:
+        wa_kwargs["bot_username"] = BOT_USERNAME
     kb.add(types.InlineKeyboardButton(
         "🎫 Открыть билет",
-        web_app=types.WebAppInfo(url=f"{RENDER_URL}/ticket/{token}", is_fullscreen=True),
+        web_app=types.WebAppInfo(**wa_kwargs),
     ))
     kb.add(types.InlineKeyboardButton(
         "⭐ В избранное",
