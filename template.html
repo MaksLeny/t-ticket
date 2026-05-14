@@ -12,28 +12,26 @@
   var tg = window.Telegram && window.Telegram.WebApp;
   if (!tg) return;
   tg.ready();
-  tg.expand(); // растянуть панель до максимума (работает без жеста)
 
-  // requestFullscreen требует жест пользователя — показываем кнопку
-  if (typeof tg.requestFullscreen === 'function') {
-    var btn = document.createElement('button');
-    btn.textContent = '⛶ На весь экран';
-    btn.style.cssText = (
-      'position:fixed;top:10px;right:10px;z-index:9999;' +
-      'background:rgba(0,0,0,0.55);color:#fff;border:none;' +
-      'border-radius:8px;padding:6px 12px;font-size:13px;' +
-      'cursor:pointer;backdrop-filter:blur(4px);'
-    );
-    btn.onclick = function() {
-      tg.requestFullscreen();
-      btn.style.display = 'none';
-    };
-    document.addEventListener('DOMContentLoaded', function() {
-      document.body.appendChild(btn);
-    });
+  // expand() — растягивает панель Mini App до максимума.
+  // Работает без жеста, даёт почти полный экран на большинстве устройств.
+  tg.expand();
+
+  // requestFullscreen() — настоящий полный экран (Bot API 8.0+, TG 10.1+).
+  // Требует жест пользователя — вызываем через 300 мс после первого тапа.
+  var fsRequested = false;
+  function tryFullscreen() {
+    if (fsRequested) return;
+    if (typeof tg.requestFullscreen === "function") {
+      try { tg.requestFullscreen(); fsRequested = true; } catch(e) {}
+    }
   }
+  // Первый тап в любом месте страницы — запрашиваем fullscreen
+  document.addEventListener("touchstart", tryFullscreen, { once: true, passive: true });
+  document.addEventListener("click",      tryFullscreen, { once: true });
 })();
-</script></head>
+</script>
+</head>
 <script>
     // 1. Получаем данные из ссылки (маршрут и ТС)
     const urlParams = new URLSearchParams(window.location.search);
