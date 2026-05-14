@@ -616,7 +616,7 @@ def ticket_keyboard(token: str, route: str) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(
         "🎫 Открыть билет",
-        web_app=types.WebAppInfo(url=f"{RENDER_URL}/ticket/{token}"),
+        web_app=types.WebAppInfo(url=f"{RENDER_URL}/ticket/{token}", is_fullscreen=True),
     ))
     kb.add(types.InlineKeyboardButton(
         "⭐ В избранное",
