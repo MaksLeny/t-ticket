@@ -60,6 +60,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 # Путь к файлу данных пользователей в репозитории
 USERDATA_FILE = "user_data.json"
 MSK           = timezone(timedelta(hours=3))
+START_TIME    = datetime.now(timezone.utc)   # Момент запуска — для uptime в /admin
 # Секрет для верификации Telegram webhook-запросов.
 # Telegram добавляет заголовок X-Telegram-Bot-Api-Secret-Token к каждому POST.
 # Мы проверяем его в /webhook/ — запросы без токена получают 403.
@@ -378,6 +379,10 @@ bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
 # expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
 ticket_store: dict[str, tuple] = {}
 
+# Rate limiting: user_id → list[timestamp] (последние генерации за скользящий час)
+RATE_LIMIT_MAX  = 10   # максимум билетов в час на пользователя
+rate_limit_store: dict[int, list[float]] = {}
+
 
 @flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
@@ -642,6 +647,60 @@ def favorites_keyboard(favorites: list, edit_mode: bool = False) -> types.Inline
 
 
 
+def _format_uptime() -> str:
+    """Возвращает строку вида 'Работает 3 дня 14 часов 22 минуты'."""
+    delta   = datetime.now(timezone.utc) - START_TIME
+    total_s = int(delta.total_seconds())
+    days    = total_s // 86400
+    hours   = (total_s % 86400) // 3600
+    minutes = (total_s % 3600) // 60
+
+    def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+        if 11 <= n % 100 <= 14:
+            return many
+        r = n % 10
+        if r == 1:  return one
+        if 2 <= r <= 4: return few
+        return many
+
+    parts = []
+    if days:
+        parts.append(f"{days} {_plural_ru(days, 'день', 'дня', 'дней')}")
+    if hours:
+        parts.append(f"{hours} {_plural_ru(hours, 'час', 'часа', 'часов')}")
+    if minutes or not parts:
+        parts.append(f"{minutes} {_plural_ru(minutes, 'минута', 'минуты', 'минут')}")
+    return "Работает " + " ".join(parts)
+
+
+def _check_rate_limit(user_id: int) -> tuple[bool, int]:
+    """
+    Проверяет лимит генерации билетов.
+    Возвращает (allowed: bool, remaining: int).
+    Использует скользящее окно 1 час.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    window_start = now - 3600
+    timestamps = rate_limit_store.get(user_id, [])
+    # Оставляем только события за последний час
+    timestamps = [t for t in timestamps if t > window_start]
+    rate_limit_store[user_id] = timestamps
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        # Когда освободится следующий слот
+        oldest = min(timestamps)
+        wait_secs = int(oldest + 3600 - now) + 1
+        return False, wait_secs
+    return True, RATE_LIMIT_MAX - len(timestamps)
+
+
+def _register_rate_limit(user_id: int) -> None:
+    """Регистрирует факт генерации билета для rate limiting."""
+    now = datetime.now(timezone.utc).timestamp()
+    if user_id not in rate_limit_store:
+        rate_limit_store[user_id] = []
+    rate_limit_store[user_id].append(now)
+
+
 def _cleanup_expired_tickets() -> int:
     """
     Удаляет из ticket_store все записи у которых истёк срок хранения.
@@ -667,6 +726,21 @@ def _send_ticket(
     is_new_ticket: bool = False,
 ):
     user = get_user(message.chat.id, message.from_user)
+
+    # ── Rate limiting ──────────────────────────────────────────────────────────
+    if not is_admin(message.from_user.id):
+        allowed, info = _check_rate_limit(message.from_user.id)
+        if not allowed:
+            wait_min = (info + 59) // 60
+            bot.send_message(
+                message.chat.id,
+                f"⛔ *Лимит превышен!*\n\n"
+                f"Максимум {RATE_LIMIT_MAX} билетов в час.\n"
+                f"Следующий доступен через ~{wait_min} мин.",
+                parse_mode="Markdown",
+            )
+            return
+    # ──────────────────────────────────────────────────────────────────────────
 
     if msg_date_override is not None:
         payment_unix = msg_date_override
@@ -695,6 +769,8 @@ def _send_ticket(
 
     log_event(message.from_user, f"билет №{route} ТС {vehicle}")
     user["tickets_count"] = user.get("tickets_count", 0) + 1
+    # Регистрируем для rate limiting
+    _register_rate_limit(message.from_user.id)
     # Синхронное сохранение — генерация билета критична, нельзя терять данные
     _save_user_data_sync()
 
@@ -910,7 +986,7 @@ def handle_about(message: types.Message):
             pass
 
 
-@bot.message_handler(func=lambda m: get_user(m.from_user.id, m.from_user).get("state") == "awaiting_input")
+@bot.message_handler(func=lambda m: user_data.get(m.from_user.id, {}).get("state") == "awaiting_input")
 def handle_input(message: types.Message):
     try:
         if not check_access(message): return
@@ -944,7 +1020,7 @@ def handle_input(message: types.Message):
 
 
 @bot.message_handler(
-    func=lambda m: str(get_user(m.from_user.id, m.from_user).get("state", "")).startswith("awaiting_vehicle:")
+    func=lambda m: str(user_data.get(m.from_user.id, {}).get("state", "")).startswith("awaiting_vehicle:")
 )
 def handle_vehicle_input(message: types.Message):
     try:
@@ -1161,6 +1237,7 @@ def handle_admin(message: types.Message):
 
         text = (
             "🛠 *Админ-панель*\n\n"
+            f"⏱ *{_format_uptime()}*\n\n"
             f"👥 Всего пользователей: *{total_users}*\n"
             f"🎫 Билетов за сегодня: *{tickets_today}*\n"
             f"🟢 Активных билетов сейчас: *{active_tickets}*\n"
@@ -1186,7 +1263,7 @@ def handle_help_admin(message: types.Message):
         text = (
             "🛠 *Команды администратора:*\n\n"
             "📊 *Панель и статистика:*\n"
-            "/admin — Панель: статистика, логи, пользователи\n"
+            "/admin — Панель: статистика, uptime, логи, пользователи\n"
             "/allowed — Список всех разрешённых пользователей\n"
             "/ha — Эта справка\n\n"
             "👥 *Управление доступом:*\n"
@@ -1194,6 +1271,9 @@ def handle_help_admin(message: types.Message):
             "  Пример: `/allow 123456789`\n"
             "/deny `<user_id>` — Удалить пользователя\n"
             "  Пример: `/deny 123456789`\n\n"
+            "📣 *Рассылка:*\n"
+            "/broadcast `<текст>` — Отправить сообщение всем пользователям\n"
+            "  Пример: `/broadcast Плановые работы с 22:00`\n\n"
             "💾 *Данные:*\n"
             "/datasync — Принудительная синхронизация user_data на GitHub\n\n"
             "─────────────────────\n"
@@ -1426,6 +1506,78 @@ def handle_datasync(message: types.Message):
         log.exception("Ошибка в handle_datasync")
         try:
             bot.send_message(message.chat.id, f"⚠️ Ошибка: {e}")
+        except Exception:
+            pass
+
+
+@bot.message_handler(commands=["broadcast"])
+def handle_broadcast(message: types.Message):
+    """Рассылает сообщение всем пользователям. Только для администраторов."""
+    try:
+        if not check_admin(message): return
+
+        # Извлекаем текст после команды
+        parts = message.text.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            bot.send_message(
+                message.chat.id,
+                "📣 *Broadcast — рассылка всем пользователям*\n\n"
+                "Формат: `/broadcast <текст>`\n\n"
+                "Пример:\n"
+                "`/broadcast 🔧 Плановые работы сегодня с 22:00 до 23:00. Бот будет недоступен.`",
+                parse_mode="Markdown",
+            )
+            return
+
+        text_to_send = parts[1].strip()
+        broadcast_text = (
+            f"📣 *Сообщение от администратора:*\n\n{text_to_send}"
+        )
+
+        # Собираем всех получателей (все кроме отправляющего админа)
+        all_ids: set[int] = set()
+        all_ids.update(ADMIN_IDS)
+        all_ids.update(USER_IDS)
+        all_ids.update(dynamic_allowed_users)
+        all_ids.discard(message.from_user.id)   # себе не слать
+
+        wait = bot.send_message(
+            message.chat.id,
+            f"⏳ Рассылаю {len(all_ids)} пользователям...",
+        )
+
+        ok_count   = 0
+        fail_count = 0
+        for uid in all_ids:
+            try:
+                bot.send_message(uid, broadcast_text, parse_mode="Markdown")
+                ok_count += 1
+            except Exception as exc:
+                log.warning("broadcast: не удалось отправить %s: %s", uid, exc)
+                fail_count += 1
+
+        log_event(message.from_user, f"broadcast: {len(all_ids)} получателей, ОК={ok_count}")
+        log.info("Broadcast от %s: всего=%d, ОК=%d, ошибок=%d",
+                 message.from_user.id, len(all_ids), ok_count, fail_count)
+
+        try:
+            bot.delete_message(message.chat.id, wait.message_id)
+        except Exception:
+            pass
+
+        result_icon = "✅" if fail_count == 0 else "⚠️"
+        bot.send_message(
+            message.chat.id,
+            f"{result_icon} *Рассылка завершена*\n\n"
+            f"✅ Доставлено: *{ok_count}*\n"
+            f"❌ Не доставлено: *{fail_count}*\n\n"
+            f"💬 Текст:\n_{text_to_send}_",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        log.exception("Ошибка в handle_broadcast")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при рассылке.")
         except Exception:
             pass
 
