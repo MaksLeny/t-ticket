@@ -3,6 +3,21 @@
  url: https://qr.bilet.nspk.ru/result?operationid=f3bf78a8-019d-f000-ac87-d4303038d6ef 
  saved date: Tue May 12 2026 01:50:47 GMT+0300 (Москва, стандартное время)
 --><meta charset=utf-8>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+  // Разворачиваем на весь экран сразу при загрузке
+  try {
+    if (window.Telegram && window.Telegram.WebApp) {
+      var tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
+      // Bot API 7.8+ requestFullscreen
+      if (typeof tg.requestFullscreen === 'function') {
+        tg.requestFullscreen();
+      }
+    }
+  } catch(e) {}
+</script>
 <title>Уведомление об оплате</title>
 
 <meta name=viewport content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
