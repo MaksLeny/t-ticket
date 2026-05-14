@@ -78,7 +78,7 @@ ADMIN_IDS: set[int] = {
     2021457397,   # владелец бота
 }
 USER_IDS: set[int] = {
-    6176826288,
+    6176826288,   # Савелий
 }
 
 # =============================================================================
@@ -1093,16 +1093,23 @@ def handle_help_admin(message: types.Message):
         if not check_admin(message): return
         text = (
             "🛠 *Команды администратора:*\n\n"
-            "/admin — *Админ-панель*\n"
-            "  Статистика, логи, список пользователей\n\n"
-            "/allow <user_id> — *Добавить пользователя*\n"
-            "  Пример: `/allow 123456789`\n\n"
-            "/deny <user_id> — *Удалить пользователя*\n"
+            "📊 *Панель и статистика:*\n"
+            "/admin — Панель: статистика, логи, пользователи\n"
+            "/allowed — Список всех разрешённых пользователей\n"
+            "/ha — Эта справка\n\n"
+            "👥 *Управление доступом:*\n"
+            "/allow `<user_id>` — Добавить пользователя\n"
+            "  Пример: `/allow 123456789`\n"
+            "/deny `<user_id>` — Удалить пользователя\n"
             "  Пример: `/deny 123456789`\n\n"
-            "/allowed — *Список всех разрешённых пользователей*\n\n"
-            "/ha — *Эта справка*\n\n"
-            "/datasync — *Принудительная синхронизация*\n"
-            "  Сохраняет user_data на GitHub прямо сейчас"
+            "💾 *Данные:*\n"
+            "/datasync — Принудительная синхронизация user_data на GitHub\n\n"
+            "─────────────────────\n"
+            "👤 *Команды пользователя:*\n\n"
+            "/start — Запустить бота\n"
+            "/help — Справка по боту\n"
+            "/status — Информация о текущем билете\n"
+            "/cancel — Отменить текущее действие\n"
         )
         bot.send_message(message.chat.id, text, parse_mode="Markdown")
     except Exception as e:
@@ -1145,7 +1152,7 @@ def handle_allow(message: types.Message):
             bot.send_message(message.chat.id, f"❌ Ошибка GitHub:\n{e}")
             return
 
-        # Записываем дату добавления в user_data
+        # Записываем дату добавления
         u = get_user(user_id)
         u["added_at"] = datetime.now(MSK).strftime("%d.%m.%Y")
 
@@ -1235,13 +1242,12 @@ def handle_allowed(message: types.Message):
     try:
         if not check_admin(message): return
 
-        def format_user(uid: int, icon: str) -> str:
-            d        = user_data.get(uid, {})
-            username = d.get("username", "—")
-            name     = d.get("name", "—")
-            added    = d.get("added_at", "—")
-            tickets  = d.get("tickets_count", 0)
-            uname    = f"@{username}" if username != "—" else "без username"
+        def fmt(uid: int, icon: str) -> str:
+            d       = user_data.get(uid, {})
+            uname   = f"@{d.get('username','—')}" if d.get('username','—') != '—' else 'без username'
+            name    = d.get('name', '—')
+            added   = d.get('added_at', '—')
+            tickets = d.get('tickets_count', 0)
             return (
                 f"{icon} {uname} · {name}\n"
                 f"    🆔 `{uid}` · 📅 с {added} · 🎫 {tickets} шт."
@@ -1249,24 +1255,21 @@ def handle_allowed(message: types.Message):
 
         lines = ["📋 *Список разрешённых пользователей*\n"]
 
-        # Администраторы
         lines.append(f"👑 *Администраторы — {len(ADMIN_IDS)} чел.:*")
         for uid in sorted(ADMIN_IDS):
-            lines.append(format_user(uid, "👑"))
+            lines.append(fmt(uid, "👑"))
 
-        # Статические пользователи (из кода)
         lines.append(f"\n👤 *Пользователи (код) — {len(USER_IDS)} чел.:*")
         if USER_IDS:
             for uid in sorted(USER_IDS):
-                lines.append(format_user(uid, "👤"))
+                lines.append(fmt(uid, "👤"))
         else:
             lines.append("  нет")
 
-        # Динамические пользователи (добавлены через /allow)
         lines.append(f"\n🆕 *Добавлены через /allow — {len(dynamic_allowed_users)} чел.:*")
         if dynamic_allowed_users:
             for uid in sorted(dynamic_allowed_users):
-                lines.append(format_user(uid, "🆕"))
+                lines.append(fmt(uid, "🆕"))
         else:
             lines.append("  нет")
 
@@ -1282,16 +1285,12 @@ def handle_allowed(message: types.Message):
             pass
 
 
-
-
 @bot.message_handler(commands=["datasync"])
 def handle_datasync(message: types.Message):
-    """
-    Принудительно сохраняет user_data на GitHub прямо сейчас.
-    Полезно после ручных изменений или для проверки что GitHub настроен.
-    """
+    """Принудительно сохраняет user_data на GitHub. Только для администраторов."""
     try:
         if not check_admin(message): return
+
         if not _gh_available():
             bot.send_message(
                 message.chat.id,
@@ -1301,18 +1300,35 @@ def handle_datasync(message: types.Message):
                 parse_mode="Markdown",
             )
             return
+
         wait = bot.send_message(message.chat.id, "⏳ Сохраняю user_data на GitHub...")
         ok = _save_user_data_sync()
+
+        try:
+            bot.delete_message(message.chat.id, wait.message_id)
+        except Exception:
+            pass
+
         if ok:
-            bot.edit_message_text(
-                "✅ user_data успешно сохранён на GitHub.\n\n"
-                "Проверь репозиторий — должен появиться файл `user_data.json`.",
-                message.chat.id, wait.message_id, parse_mode="Markdown",
+            ts = datetime.now(MSK).strftime("%d.%m.%Y %H:%M:%S")
+            bot.send_message(
+                message.chat.id,
+                f"✅ *Синхронизация выполнена*\n\n"
+                f"📁 Файл `user_data.json` обновлён на GitHub\n"
+                f"👥 Пользователей сохранено: *{len(user_data)}*\n"
+                f"🕐 Время: {ts}",
+                parse_mode="Markdown",
             )
+            log.info("datasync: сохранено %d пользователей", len(user_data))
         else:
-            bot.edit_message_text(
-                "❌ Не удалось сохранить. Проверь логи Render и права токена (scope: repo).",
-                message.chat.id, wait.message_id,
+            bot.send_message(
+                message.chat.id,
+                "❌ *Не удалось сохранить данные*\n\n"
+                "Проверь:\n"
+                "• Логи Render на наличие ошибок\n"
+                "• Права токена GitHub (scope: `repo`)\n"
+                "• Правильность `GITHUB_OWNER` и `GITHUB_REPO`",
+                parse_mode="Markdown",
             )
     except Exception as e:
         log.exception("Ошибка в handle_datasync")
@@ -1320,6 +1336,7 @@ def handle_datasync(message: types.Message):
             bot.send_message(message.chat.id, f"⚠️ Ошибка: {e}")
         except Exception:
             pass
+
 
 # =============================================================================
 # ЗАПУСК
