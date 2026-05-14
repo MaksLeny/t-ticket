@@ -1288,11 +1288,6 @@ def handle_help_admin(message: types.Message):
         log.exception("Ошибка в handle_help_admin")
 
 
-@bot.message_handler(func=lambda m: m.text is not None and (m.text == "/ha" or m.text.startswith("/ha@") or m.text.startswith("/ha ")))
-def handle_help_admin_fallback(message: types.Message):
-    return handle_help_admin(message)
-
-
 @bot.message_handler(commands=["allow"])
 def handle_allow(message: types.Message):
     """Добавляет пользователя в список разрешённых."""
