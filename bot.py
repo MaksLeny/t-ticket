@@ -986,7 +986,7 @@ def handle_about(message: types.Message):
             pass
 
 
-@bot.message_handler(func=lambda m: user_data.get(m.from_user.id, {}).get("state") == "awaiting_input")
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith("/") and user_data.get(m.from_user.id, {}).get("state") == "awaiting_input")
 def handle_input(message: types.Message):
     try:
         if not check_access(message): return
@@ -1020,7 +1020,7 @@ def handle_input(message: types.Message):
 
 
 @bot.message_handler(
-    func=lambda m: str(user_data.get(m.from_user.id, {}).get("state", "")).startswith("awaiting_vehicle:")
+    func=lambda m: m.text and not m.text.startswith("/") and str(user_data.get(m.from_user.id, {}).get("state", "")).startswith("awaiting_vehicle:")
 )
 def handle_vehicle_input(message: types.Message):
     try:
