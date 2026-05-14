@@ -46,11 +46,12 @@ def _require_env(name: str) -> str:
         raise SystemExit(1)
     return value
 
-BOT_TOKEN     = _require_env("BOT_TOKEN")
-RENDER_URL    = _require_env("RENDER_URL")
-# Юзернейм бота (без @) — нужен для кнопки "Перейти в бота" в меню Mini App.
-# Задай в Render → Environment: BOT_USERNAME=твой_бот
-BOT_USERNAME  = os.environ.get("BOT_USERNAME", "")
+BOT_TOKEN      = _require_env("BOT_TOKEN")
+RENDER_URL     = _require_env("RENDER_URL")
+# Telegram Mini App — Direct Link запуск.
+# Задай в Render → Environment (или поменяй здесь если не меняются).
+BOT_USERNAME   = os.environ.get("BOT_USERNAME",   "ticket_murmansk_bot")
+APP_SHORT_NAME = os.environ.get("APP_SHORT_NAME", "ticket_murman")
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
 
 # GitHub API — для персистентного user_data и whitelist.
@@ -400,17 +401,36 @@ def webhook():
     return "ok", 200
 
 
+# Корневой маршрут — отдаёт template.html как оболочку Mini App.
+# Telegram открывает именно "/" когда пользователь нажимает Direct Link.
+# start_param (token) передаётся через tg.initDataUnsafe.start_param в JS.
+@flask_app.route("/")
+def serve_index():
+    try:
+        with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
+            html = f.read()
+        return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+    except FileNotFoundError:
+        abort(404)
+
+
+# /ticket/<token> — отдаёт готовый HTML билета (без SDK) для fetch() из JS.
+# Используется только внутренним fetch в template.html — не открывается напрямую.
 @flask_app.route("/ticket/<token>")
 def serve_ticket(token: str):
     entry = ticket_store.get(token)
     if entry is None:
         abort(404)
     html_bytes, expires_at = entry
-    # Билет просрочен — отдаём 410 Gone вместо 404 чтобы пользователь понял почему
+    # Билет просрочен — 410 Gone
     if datetime.now(timezone.utc).timestamp() > expires_at:
         ticket_store.pop(token, None)
         abort(410)
-    return html_bytes, 200, {"Content-Type": "text/html; charset=utf-8"}
+    # Добавляем CORS-заголовок — fetch из того же origin, но на всякий случай
+    return html_bytes, 200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+    }
 
 
 @flask_app.route("/healthz")
@@ -616,14 +636,19 @@ def main_keyboard() -> types.ReplyKeyboardMarkup:
 
 
 def ticket_keyboard(token: str, route: str) -> types.InlineKeyboardMarkup:
+    """
+    Кнопка использует Direct Link формат:
+      https://t.me/<bot>/<app>?startapp=<token>
+    Именно этот формат активирует:
+      • полноэкранный режим (fullscreen) по умолчанию
+      • кнопку "Перейти в бота" в меню ⋮
+      • нативное поведение Mini App а не просто WebView
+    """
     kb = types.InlineKeyboardMarkup(row_width=1)
-    # bot_username — добавляет кнопку "Перейти в бота" в меню ⋮ Mini App
-    wa_kwargs = {"url": f"{RENDER_URL}/ticket/{token}", "is_fullscreen": True}
-    if BOT_USERNAME:
-        wa_kwargs["bot_username"] = BOT_USERNAME
+    direct_link = f"https://t.me/{BOT_USERNAME}/{APP_SHORT_NAME}?startapp={token}"
     kb.add(types.InlineKeyboardButton(
         "🎫 Открыть билет",
-        web_app=types.WebAppInfo(**wa_kwargs),
+        url=direct_link,
     ))
     kb.add(types.InlineKeyboardButton(
         "⭐ В избранное",
