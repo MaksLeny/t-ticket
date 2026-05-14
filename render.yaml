@@ -9,9 +9,9 @@ services:
       - key: BOT_TOKEN
         sync: false          # токен бота от @BotFather
       - key: RENDER_URL
-        sync: false          # публичный URL сервиса, напр. https://my-bot.onrender.com
+        sync: false          # публичный URL, напр. https://my-bot.onrender.com
 
-      # ── GitHub API (для персистентного whitelist) ─────────────────────────
+      # ── GitHub API (персистентный user_data + whitelist) ──────────────────
       # Получить токен: GitHub → Settings → Developer settings
       #   → Personal access tokens → Tokens (classic)
       #   → Generate new token → отметь scope "repo" → Generate
@@ -22,4 +22,4 @@ services:
       - key: GITHUB_REPO
         sync: false          # название репозитория, напр. t-ticket
       - key: GITHUB_BRANCH
-        value: main          # ветка (менять не нужно если используешь main)
+        value: main          # ветка (обычно main, менять не нужно)
