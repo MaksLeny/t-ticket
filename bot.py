@@ -403,11 +403,33 @@ def serve_ticket(token: str):
     if entry is None:
         abort(404)
     html_bytes, expires_at = entry
-    # Билет просрочен — отдаём 410 Gone вместо 404 чтобы пользователь понял почему
     if datetime.now(timezone.utc).timestamp() > expires_at:
         ticket_store.pop(token, None)
         abort(410)
-    return html_bytes, 200, {"Content-Type": "text/html; charset=utf-8"}
+    # Инжектируем Telegram Web App SDK и expand() чтобы билет открывался
+    # на весь экран без верхней шторки и кнопки "закрыть"
+    twa_script = (
+        b'<script src="https://telegram.org/js/telegram-web-app.js"></script>'
+        b'<script>'
+        b'try{'
+        b'  var twa=window.Telegram&&window.Telegram.WebApp;'
+        b'  if(twa){'
+        b'    twa.ready();'
+        b'    twa.expand();'
+        b'    twa.enableClosingConfirmation&&twa.enableClosingConfirmation();'
+        b'  }'
+        b'}catch(e){}'
+        b'</script>'
+    )
+    # Вставляем скрипт сразу после <head> или в начало <body>
+    html = html_bytes
+    if b'<head>' in html:
+        html = html.replace(b'<head>', b'<head>' + twa_script, 1)
+    elif b'<body>' in html:
+        html = html.replace(b'<body>', b'<body>' + twa_script, 1)
+    else:
+        html = twa_script + html
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @flask_app.route("/healthz")
@@ -616,7 +638,7 @@ def ticket_keyboard(token: str, route: str) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(
         "🎫 Открыть билет",
-        web_app=types.WebAppInfo(url=f"{RENDER_URL}/ticket/{token}", is_fullscreen=True),
+        web_app=types.WebAppInfo(url=f"{RENDER_URL}/ticket/{token}"),
     ))
     kb.add(types.InlineKeyboardButton(
         "⭐ В избранное",
@@ -1043,7 +1065,7 @@ def handle_vehicle_input(message: types.Message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav:"))
 def handle_fav_callback(call: types.CallbackQuery):
     try:
-        user    = get_user(call.from_user.id)
+        user    = get_user(call.from_user.id, call.from_user)
         payload = call.data[4:]
 
         if payload == "close":
@@ -1098,7 +1120,7 @@ def handle_fav_callback(call: types.CallbackQuery):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("remove_fav:"))
 def handle_remove_fav_callback(call: types.CallbackQuery):
     try:
-        user = get_user(call.from_user.id)
+        user = get_user(call.from_user.id, call.from_user)
         idx = int(call.data[11:])
         if idx >= len(user["favorites"]):
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
@@ -1139,7 +1161,7 @@ def handle_remove_fav_callback(call: types.CallbackQuery):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_fav:"))
 def handle_add_fav_callback(call: types.CallbackQuery):
     try:
-        user  = get_user(call.from_user.id)
+        user  = get_user(call.from_user.id, call.from_user)
         route = call.data[8:]
 
         if route in user["favorites"]:
@@ -1402,12 +1424,21 @@ def handle_deny(message: types.Message):
         try:
             _whitelist_remove(user_id)
         except RuntimeError as e:
-            bot.edit_message_text(f"❌ Ошибка GitHub:\n{e}", message.chat.id, wait.message_id)
+            try:
+                bot.delete_message(message.chat.id, wait.message_id)
+            except Exception:
+                pass
+            bot.send_message(message.chat.id, f"❌ Ошибка GitHub:\n{e}")
             return
         log_event(message.from_user, f"запретил доступ {user_id}")
-        bot.edit_message_text(
-            f"✅ Пользователь `{user_id}` удалён. Сохранено в bot.py на GitHub.",
-            message.chat.id, wait.message_id, parse_mode="Markdown",
+        try:
+            bot.delete_message(message.chat.id, wait.message_id)
+        except Exception:
+            pass
+        bot.send_message(
+            message.chat.id,
+            f"✅ Пользователь `{user_id}` удалён.\n📁 Сохранено в bot.py на GitHub.",
+            parse_mode="Markdown",
         )
         log.info("Удалён пользователь %s админом %s", user_id, message.from_user.id)
     except Exception as e:
