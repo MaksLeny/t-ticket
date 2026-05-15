@@ -16,12 +16,8 @@
   var tg = window.Telegram && window.Telegram.WebApp;
   if (tg) {
     tg.ready();
-
-    // Растягиваем панель до максимума — работает без жеста пользователя
     tg.expand();
 
-    // requestFullscreen — настоящий полный экран (Bot API 8.0+, TG ≥ 10.1).
-    // Нативный fullscreen требует явного жеста — вызываем при первом тапе.
     if (typeof tg.requestFullscreen === "function") {
       document.addEventListener("touchstart", function fs() {
         document.removeEventListener("touchstart", fs);
@@ -33,28 +29,64 @@
       });
     }
 
-    // Устанавливаем цвет шапки под фон билета
     tg.setHeaderColor("#f5f1e8");
     tg.setBackgroundColor("#f5f1e8");
   }
 
-  /* ── Получаем token из start_param (Direct Link: ?startapp=TOKEN) ── */
-  // При Direct Link запуске Telegram передаёт параметр через:
-  //   tg.initDataUnsafe.start_param  — основной способ
-  //   window.location.hash / search  — fallback для браузера
+  /* ── Получаем token из start_param ── */
   var token = "";
-
   if (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) {
     token = tg.initDataUnsafe.start_param;
   } else {
-    // Fallback: обычный URL-параметр (открытие в браузере или старый режим)
     var urlParams = new URLSearchParams(window.location.search);
     token = urlParams.get("startapp") || urlParams.get("token") || "";
   }
 
-  /* ── Если token есть — загружаем HTML билета с Flask-сервера ── */
-  // Сервер Flask по-прежнему отдаёт готовый HTML по /ticket/<token>.
-  // Мы загружаем его fetch-ом и подменяем содержимое страницы.
+  /* ── Таймер ── */
+  var timerInterval = null;
+
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+
+  function startTimer(paymentUnix) {
+    if (!paymentUnix || isNaN(paymentUnix)) return;
+    if (timerInterval) clearInterval(timerInterval);
+
+    function tick() {
+      var total = Math.max(0, Math.floor(Date.now() / 1000) - paymentUnix);
+      var h = Math.floor(total / 3600);
+      var m = Math.floor((total % 3600) / 60);
+      var s = total % 60;
+      var txt = (h > 0 ? pad(h) + ":" : "") + pad(m) + ":" + pad(s);
+      document.querySelectorAll("strong").forEach(function (el) {
+        if (/^\d{1,2}:\d{2}/.test(el.textContent.trim())) {
+          el.textContent = txt;
+        }
+      });
+    }
+    tick();
+    timerInterval = setInterval(tick, 1000);
+  }
+
+  /* ── Извлекаем payment_unix из HTML билета ── */
+  // Python вставляет число через: html.replace("{{T_PAY}}", str(payment_unix))
+  // Мы ищем его как атрибут data-pay-unix ИЛИ как 10-значное число в скрипте.
+  function extractPaymentUnix(html) {
+    // Способ 1: атрибут data-pay-unix="..."
+    var m1 = html.match(/data-pay-unix="(\d{10})"/);
+    if (m1) return parseInt(m1[1], 10);
+
+    // Способ 2: var p = XXXXXXXXXX; — вставляется через build_html в bot.py
+    var m2 = html.match(/var p = (\d{10})/);
+    if (m2) return parseInt(m2[1], 10) + 23; // компенсируем -23 из build_html
+
+    // Способ 3: любое 10-значное число в тексте (последний резерв)
+    var m3 = html.match(/\b(1[5-9]\d{8})\b/);
+    if (m3) return parseInt(m3[1], 10);
+
+    return 0;
+  }
+
+  /* ── Загружаем билет через fetch ── */
   if (token) {
     var serverUrl = window.location.origin + "/ticket/" + token;
     fetch(serverUrl)
@@ -63,58 +95,24 @@
         return r.text();
       })
       .then(function (ticketHtml) {
-        // Подменяем только <body> — сохраняем наш SDK в <head>
-        var parser   = new DOMParser();
-        var doc      = parser.parseFromString(ticketHtml, "text/html");
+        // Извлекаем payment_unix ДО подмены body
+        var paymentUnix = extractPaymentUnix(ticketHtml);
+
+        // Подменяем body
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(ticketHtml, "text/html");
         document.body.innerHTML = doc.body.innerHTML;
-        startTimer();
+
+        // Запускаем таймер с уже известным временем
+        startTimer(paymentUnix);
       })
       .catch(function (err) {
         document.body.innerHTML =
-          "<div style=\"padding:40px;text-align:center;font-family:sans-serif;\">" +
-          "<p style=\"font-size:18px;\">⏱ Билет истёк или не найден</p>" +
-          "<p style=\"color:#888;font-size:14px;\">" + err.message + "</p></div>";
+          "<div style='padding:40px;text-align:center;font-family:sans-serif;'>" +
+          "<p style='font-size:18px;'>⏱ Билет истёк или не найден</p>" +
+          "<p style='color:#888;font-size:14px;'>" + err.message + "</p></div>";
       });
   }
-
-  /* ── Живой таймер ────────────────────────────────────────────── */
-  // Таймер запускается и после fetch-замены body, и при прямом рендере
-  // (когда сервер уже вставил плейсхолдеры через Python build_html).
-  function startTimer() {
-    // paymentUnix вставляет Python: html.replace("{{T_PAY}}", str(payment_unix))
-    var payEl = document.querySelector("[data-pay-unix]");
-    var paymentUnix = payEl
-      ? parseInt(payEl.getAttribute("data-pay-unix"), 10)
-      : 0;
-
-    // Fallback — ищем текст вида "{{T_PAY}}" который мог остаться
-    if (!paymentUnix) {
-      document.querySelectorAll("*").forEach(function (el) {
-        if (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3) {
-          var t = el.textContent.trim();
-          if (/^\d{10}$/.test(t)) { paymentUnix = parseInt(t, 10); }
-        }
-      });
-    }
-
-    function pad(n) { return n < 10 ? "0" + n : "" + n; }
-    function tick() {
-      var total = Math.max(0, Math.floor(Date.now() / 1000) - paymentUnix);
-      var h = Math.floor(total / 3600);
-      var m = Math.floor((total % 3600) / 60);
-      var s = total % 60;
-      var txt = (h > 0 ? pad(h) + ":" : "") + pad(m) + ":" + pad(s);
-      document.querySelectorAll("strong").forEach(function (el) {
-        if (/^\d{2}:/.test(el.textContent.trim())) {
-          el.textContent = txt;
-        }
-      });
-    }
-    if (paymentUnix) { tick(); setInterval(tick, 1000); }
-  }
-
-  // Запускаем таймер сразу (для случая прямого рендера без fetch)
-  document.addEventListener("DOMContentLoaded", startTimer);
 
 })();
 </script>
