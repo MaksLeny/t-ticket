@@ -103,8 +103,8 @@
         var doc = parser.parseFromString(ticketHtml, "text/html");
         document.body.innerHTML = doc.body.innerHTML;
 
-        // Запускаем таймер с уже известным временем
-        startTimer(paymentUnix);
+        // Запускаем таймер: вычитаем 23 сек → старт с 00:23
+        startTimer(paymentUnix - 23);
       })
       .catch(function (err) {
         document.body.innerHTML =
