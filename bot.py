@@ -317,15 +317,25 @@ def _save_user_data_sync() -> bool:
         return _do_save_user_data()
 
 
+_save_pending = threading.Event()  # дедупликация параллельных сохранений
+
+
 def _save_user_data_async() -> None:
     """
-    Неблокирующее сохранение — запускает _save_user_data_sync в отдельном
-    НЕ-daemon потоке. Не-daemon важно: gunicorn дожидается завершения
-    таких потоков перед остановкой воркера, поэтому запись успевает дойти
-    до GitHub даже при плановом рестарте.
+    Неблокирующее сохранение с дедупликацией.
+    Если поток уже запущен — он подхватит повторный запрос через Event.
+    Не-daemon: gunicorn дожидается завершения при штатной остановке.
     """
+    _save_pending.set()
+
     def _worker():
-        _save_user_data_sync()
+        while _save_pending.is_set():
+            _save_pending.clear()
+            _save_user_data_sync()
+
+    for t in threading.enumerate():
+        if t.name == "save-userdata" and t.is_alive():
+            return  # активный поток подхватит флаг
     threading.Thread(target=_worker, daemon=False, name="save-userdata").start()
 
 
@@ -518,9 +528,7 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
         'style="width:100%;max-width:100vw;height:auto;display:block;',
     )
 
-    # Шаблон содержит полноценный скрипт: Telegram.WebApp.expand(),
-    # fullscreen и таймер. build_html его не трогает — {{T_PAY}} вставлен
-    # как data-pay-unix в <body>, JS читает его через extractPaymentUnix().
+    # Таймер вшит в template.html через {{T_PAY}} — отдельная вставка не нужна
 
     return html.encode("utf-8")
 
@@ -1085,7 +1093,11 @@ def handle_fav_callback(call: types.CallbackQuery):
             bot.answer_callback_query(call.id)
             return
 
-        idx = int(payload)
+        try:
+            idx = int(payload)
+        except ValueError:
+            bot.answer_callback_query(call.id, "⚠️ Неверный формат.")
+            return
         if idx >= len(user["favorites"]):
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
             return
@@ -1111,7 +1123,11 @@ def handle_fav_callback(call: types.CallbackQuery):
 def handle_remove_fav_callback(call: types.CallbackQuery):
     try:
         user = get_user(call.from_user.id)
-        idx = int(call.data[11:])
+        try:
+            idx = int(call.data[11:])
+        except ValueError:
+            bot.answer_callback_query(call.id, "⚠️ Неверный формат.")
+            return
         if idx >= len(user["favorites"]):
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
             return
