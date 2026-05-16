@@ -1,32 +1,32 @@
 {
   "2021457397": {
     "first_seen": "14.05.2026 13:04",
+    "added_at": "14.05.2026",
+    "username": "—",
+    "transport": "bus",
+    "tickets_count": 39,
     "name": "максим",
     "favorites": [
       "10A",
       "18"
-    ],
-    "tickets_count": 38,
-    "username": "—",
-    "transport": "bus",
-    "added_at": "14.05.2026"
+    ]
   },
   "6176826288": {
     "first_seen": "14.05.2026 15:26",
-    "name": "M",
-    "favorites": [],
-    "tickets_count": 6,
+    "added_at": "14.05.2026",
     "username": "Ferferppp",
     "transport": "bus",
-    "added_at": "14.05.2026"
+    "tickets_count": 6,
+    "name": "M",
+    "favorites": []
   },
   "1970426555": {
     "first_seen": "15.05.2026 16:13",
-    "name": "Даня",
-    "favorites": [],
-    "tickets_count": 0,
+    "added_at": "15.05.2026",
     "username": "Bounty405",
     "transport": "bus",
-    "added_at": "15.05.2026"
+    "tickets_count": 0,
+    "name": "Даня",
+    "favorites": []
   }
 }
