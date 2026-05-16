@@ -317,25 +317,15 @@ def _save_user_data_sync() -> bool:
         return _do_save_user_data()
 
 
-_save_pending = threading.Event()  # дедупликация параллельных сохранений
-
-
 def _save_user_data_async() -> None:
     """
-    Неблокирующее сохранение с дедупликацией.
-    Если поток уже запущен — он подхватит повторный запрос через Event.
-    Не-daemon: gunicorn дожидается завершения при штатной остановке.
+    Неблокирующее сохранение — запускает _save_user_data_sync в отдельном
+    НЕ-daemon потоке. Не-daemon важно: gunicorn дожидается завершения
+    таких потоков перед остановкой воркера, поэтому запись успевает дойти
+    до GitHub даже при плановом рестарте.
     """
-    _save_pending.set()
-
     def _worker():
-        while _save_pending.is_set():
-            _save_pending.clear()
-            _save_user_data_sync()
-
-    for t in threading.enumerate():
-        if t.name == "save-userdata" and t.is_alive():
-            return  # активный поток подхватит флаг
+        _save_user_data_sync()
     threading.Thread(target=_worker, daemon=False, name="save-userdata").start()
 
 
@@ -528,7 +518,30 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
         'style="width:100%;max-width:100vw;height:auto;display:block;',
     )
 
-    # Таймер вшит в template.html через {{T_PAY}} — отдельная вставка не нужна
+    # Заменяем содержимое <script> на рабочий таймер (через find/slice, без re)
+    sc_open  = "<script>"
+    sc_close = "</script>"
+    si = html.find(sc_open)
+    ei = html.find(sc_close, si)
+    if si != -1 and ei != -1:
+        timer_js = (
+            "\n(function() {\n"
+            "  var p = " + str(payment_unix - 23) + ";\n"
+            "  function pad(n){return n<10?'0'+n:''+n;}\n"
+            "  function tick(){\n"
+            "    var t=Math.max(0,Math.floor(Date.now()/1000)-p);\n"
+            "    var h=Math.floor(t/3600);\n"
+            "    var m=Math.floor((t%3600)/60);\n"
+            "    var s=t%60;\n"
+            "    var txt=(h>0?pad(h)+':':'')+pad(m)+':'+pad(s);\n"
+            "    document.querySelectorAll('strong').forEach(function(el){\n"
+            "      if(/^\\d{2}:/.test(el.textContent.trim())){el.textContent=txt;}\n"
+            "    });\n"
+            "  }\n"
+            "  tick();setInterval(tick,1000);\n"
+            "})();\n"
+        )
+        html = html[:si + len(sc_open)] + timer_js + html[ei:]
 
     return html.encode("utf-8")
 
@@ -1093,11 +1106,7 @@ def handle_fav_callback(call: types.CallbackQuery):
             bot.answer_callback_query(call.id)
             return
 
-        try:
-            idx = int(payload)
-        except ValueError:
-            bot.answer_callback_query(call.id, "⚠️ Неверный формат.")
-            return
+        idx = int(payload)
         if idx >= len(user["favorites"]):
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
             return
@@ -1123,11 +1132,7 @@ def handle_fav_callback(call: types.CallbackQuery):
 def handle_remove_fav_callback(call: types.CallbackQuery):
     try:
         user = get_user(call.from_user.id)
-        try:
-            idx = int(call.data[11:])
-        except ValueError:
-            bot.answer_callback_query(call.id, "⚠️ Неверный формат.")
-            return
+        idx = int(call.data[11:])
         if idx >= len(user["favorites"]):
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
             return
