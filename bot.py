@@ -528,7 +528,7 @@ def build_html(route: str, vehicle: str, payment_unix: int,
 
     # ── Тип транспорта ────────────────────────────────────────────────────────
     transport_label = "Троллейбус" if transport == "troll" else "Автобус"
-    html = html.replace(" Автобус: №{{ROUTE}} ", f" {transport_label}: №{{ROUTE}} ")
+    html = html.replace(" Автобус: №{{ROUTE}} ", " " + transport_label + ": №{{ROUTE}} ")
 
     html = html.replace("{{ROUTE}}",         route)
     html = html.replace("{{VEHICLE}}",       vehicle)
