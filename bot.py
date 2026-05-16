@@ -381,6 +381,9 @@ def _whitelist_remove(user_id: int) -> None:
 flask_app = Flask(__name__)
 bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
+# Время жизни билета — 2 часа с момента генерации
+TICKET_TTL = 7200  # секунд
+
 # Хранилище HTML-билетов: token → (html_bytes, expires_at)
 # expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
 ticket_store: dict[str, tuple] = {}
@@ -528,7 +531,7 @@ def build_html(route: str, vehicle: str, payment_unix: int,
 
     # ── Тип транспорта ────────────────────────────────────────────────────────
     transport_label = "Троллейбус" if transport == "troll" else "Автобус"
-    html = html.replace(" Автобус: №{{ROUTE}} ", " " + transport_label + ": №{{ROUTE}} ")
+    html = html.replace(" Автобус: №{{ROUTE}} ", f" {transport_label}: №{{ROUTE}} ")
 
     html = html.replace("{{ROUTE}}",         route)
     html = html.replace("{{VEHICLE}}",       vehicle)
@@ -800,8 +803,8 @@ def _send_ticket(
     _cleanup_expired_tickets()
 
     token = uuid.uuid4().hex
-    # Билет живёт 1 час (3600 секунд) с момента генерации
-    expires_at = datetime.now(timezone.utc).timestamp() + 3600
+    # Билет живёт TICKET_TTL секунд с момента генерации
+    expires_at = datetime.now(timezone.utc).timestamp() + TICKET_TTL
     ticket_store[token] = (html_bytes, expires_at)
 
     log_event(message.from_user, f"билет №{route} ТС {vehicle}")
