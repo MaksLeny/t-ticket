@@ -536,7 +536,7 @@ def build_html(route: str, vehicle: str, payment_unix: int,
         if "data-pay-unix" not in old_body:
             new_body = old_body.rstrip(">") + f' data-pay-unix="{display_ts}">'
         else:
-            new_body = _re.sub(r'data-pay-unix="\d+"', f'data-pay-unix="{display_ts}"', old_body)
+            new_body = _re.sub(r'data-pay-unix="[^"]*"', f'data-pay-unix="{display_ts}"', old_body)
         html = html.replace(old_body, new_body, 1)
 
     # ── Тип транспорта ────────────────────────────────────────────────────────
@@ -550,9 +550,9 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     html = _re.sub(r'(?:\{\{\s*VEHICLE\s*\}\}|\{\s*VEHICLE\s*\}|\{\s*TC\s*\})', vehicle, html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*DATETIME\s*\}\}|\{\s*DATETIME\s*\})', payment_dt.strftime("%d.%m.%Y %H:%M"), html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*ELAPSED\s*\}\}|\{\s*ELAPSED\s*\})', elapsed_str, html, flags=_re.IGNORECASE)
-    html = _re.sub(r'(?:\{\{\s*T_PAY\s*\}\}|\{\s*T_PAY\s*\})', str(payment_unix), html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*TICKET_SERIAL\s*\}\}|\{\s*TICKET_SERIAL\s*\})', generate_ticket_serial(), html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*TICKET_NUMBER\s*\}\}|\{\s*TICKET_NUMBER\s*\})', generate_ticket_number(payment_dt), html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*T_PAY\s*\}\}|\{\s*T_PAY\s*\})', str(orig_ts), html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*PRICE\s*\}\}|\{\s*PRICE\s*\})', "53", html, flags=_re.IGNORECASE)
 
     # ── Адаптивный QR-код ─────────────────────────────────────────────────────
