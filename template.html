@@ -1,3 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Билет</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:16px;background:#f6f6f6}
+    #ticket{max-width:800px;margin:0 auto;background:#fff;padding:16px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08)}
+    .center{text-align:center}
+  </style>
+</head>
+<body>
+  <div id="ticket" class="center">Загрузка билета…</div>
+  <script>
+    async function init(){
+      // Попытки получить токен: query param ?startapp=TOKEN, ?start_param=TOKEN, или Telegram WebApp initData
+      let params = new URLSearchParams(location.search);
+      let token = params.get('startapp') || params.get('start_param') || null;
+      try{
+        if(!token && window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe){
+          token = Telegram.WebApp.initDataUnsafe.start_param || token;
+        }
+      }catch(e){/* ignore */}
+
+      if(!token){
+        document.getElementById('ticket').innerHTML = '<h3>Откройте этот URL через бота</h3>';
+        return;
+      }
+
+      try{
+        const res = await fetch('/ticket/' + encodeURIComponent(token));
+        if(!res.ok){
+          document.getElementById('ticket').innerHTML = '<h3>Билет недоступен (истёк или удалён)</h3>';
+          return;
+        }
+        const txt = await res.text();
+        // Вставляем содержимое <body> из полученного HTML
+        const m = txt.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+        if(m){
+          document.getElementById('ticket').innerHTML = m[1];
+        }else{
+          document.getElementById('ticket').innerHTML = txt;
+        }
+      }catch(e){
+        document.getElementById('ticket').innerHTML = '<h3>Ошибка загрузки: '+(e.message||e)+'</h3>';
+      }
+    }
+    window.addEventListener('load', init);
+  </script>
+</body>
+</html>
+
 <!DOCTYPE html> <html lang=ru data-beasties-container style><!--
  Page saved with SingleFile 
  url: https://qr.bilet.nspk.ru/result?operationid=f3bf78a8-019d-f000-ac87-d4303038d6ef 
