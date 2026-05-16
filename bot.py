@@ -533,15 +533,17 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     transport_label = "Троллейбус" if transport == "troll" else "Автобус"
     html = html.replace(" Автобус: №{{ROUTE}} ", f" {transport_label}: №{{ROUTE}} ")
 
-    html = html.replace("{{ROUTE}}",         route)
-    html = html.replace("{{VEHICLE}}",       vehicle)
-    html = html.replace("{{TC}}",            vehicle)
-    html = html.replace("{{DATETIME}}",      payment_dt.strftime("%d.%m.%Y %H:%M"))
-    html = html.replace("{{ELAPSED}}",       elapsed_str)
-    html = html.replace("{{T_PAY}}",         str(payment_unix))
-    html = html.replace("{{TICKET_SERIAL}}", generate_ticket_serial())
-    html = html.replace("{{TICKET_NUMBER}}", generate_ticket_number(payment_dt))
-    html = html.replace("{{PRICE}}",         "53")
+    # Поддерживаем несколько форматов плейсхолдеров, например:
+    #   {{ROUTE}}, {route}, {ROUTE} и т.п. — в шаблонах могут встречаться
+    # одинарные фигурные скобки и разный регистр.
+    html = _re.sub(r'(?:\{\{\s*ROUTE\s*\}\}|\{\s*ROUTE\s*\})', route, html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*VEHICLE\s*\}\}|\{\s*VEHICLE\s*\}|\{\s*TC\s*\})', vehicle, html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*DATETIME\s*\}\}|\{\s*DATETIME\s*\})', payment_dt.strftime("%d.%m.%Y %H:%M"), html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*ELAPSED\s*\}\}|\{\s*ELAPSED\s*\})', elapsed_str, html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*T_PAY\s*\}\}|\{\s*T_PAY\s*\})', str(payment_unix), html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*TICKET_SERIAL\s*\}\}|\{\s*TICKET_SERIAL\s*\})', generate_ticket_serial(), html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*TICKET_NUMBER\s*\}\}|\{\s*TICKET_NUMBER\s*\})', generate_ticket_number(payment_dt), html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*PRICE\s*\}\}|\{\s*PRICE\s*\})', "53", html, flags=_re.IGNORECASE)
 
     # ── Адаптивный QR-код ─────────────────────────────────────────────────────
     html = html.replace(
