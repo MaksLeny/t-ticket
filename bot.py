@@ -511,9 +511,15 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
-    payment_dt   = datetime.fromtimestamp(payment_unix, tz=MSK)
+    # payment_unix может быть int/float (timestamp) или datetime
+    if isinstance(payment_unix, datetime):
+        orig_ts = int(payment_unix.timestamp())
+    else:
+        orig_ts = int(payment_unix)
+
+    payment_dt   = datetime.fromtimestamp(orig_ts, tz=MSK)
     now_utc      = datetime.now(timezone.utc)
-    pay_utc      = datetime.fromtimestamp(payment_unix, tz=timezone.utc)
+    pay_utc      = datetime.fromtimestamp(orig_ts, tz=timezone.utc)
     elapsed_secs = max(0, int((now_utc - pay_utc).total_seconds()))
     elapsed_str  = f"{(elapsed_secs % 3600) // 60:02d}:{elapsed_secs % 60:02d}"
 
@@ -523,10 +529,14 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     body_match = _re.search(r"<body([^>]*)>", html)
     if body_match:
         old_body = body_match.group(0)
+        # Смещение старта таймера: показываем, что оплата была чуть раньше.
+        # Это делает таймер видимым не с ~00:03, а с желаемых ~00:23.
+        START_TIMER_OFFSET = 23
+        display_ts = max(0, orig_ts - START_TIMER_OFFSET)
         if "data-pay-unix" not in old_body:
-            new_body = old_body.rstrip(">") + f' data-pay-unix="{payment_unix}">'
+            new_body = old_body.rstrip(">") + f' data-pay-unix="{display_ts}">'
         else:
-            new_body = _re.sub(r'data-pay-unix="\d+"', f'data-pay-unix="{payment_unix}"', old_body)
+            new_body = _re.sub(r'data-pay-unix="\d+"', f'data-pay-unix="{display_ts}"', old_body)
         html = html.replace(old_body, new_body, 1)
 
     # ── Тип транспорта ────────────────────────────────────────────────────────
