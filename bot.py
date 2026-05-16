@@ -53,6 +53,7 @@ RENDER_URL     = _require_env("RENDER_URL")
 BOT_USERNAME   = os.environ.get("BOT_USERNAME",   "ticket_murmansk_bot")
 APP_SHORT_NAME = os.environ.get("APP_SHORT_NAME", "ticket_murman")
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "template.html")
+TICKET_TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ticket_template.html")
 
 # GitHub API — для персистентного user_data и whitelist.
 # Получить токен: GitHub → Settings → Developer settings
@@ -508,12 +509,12 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     Формат таймера: ММ:СС, при >59:59 автоматически ЧЧ:ММ:СС.
     """
     import re as _re
-    with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
+    with open(TICKET_TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
     # Проверяем что шаблон непустой
     if not html or not html.strip():
-        raise FileNotFoundError("template.html is missing or empty")
+        raise FileNotFoundError("ticket_template.html is missing or empty")
 
     payment_dt   = datetime.fromtimestamp(int(payment_unix), tz=MSK)
     now_utc      = datetime.now(timezone.utc)
@@ -540,19 +541,26 @@ def build_html(route: str, vehicle: str, payment_unix: int,
             new_body = _re.sub(r'data-pay-unix="\d+"', f'data-pay-unix="{payment_unix}"', old_body)
         html = html.replace(old_body, new_body, 1)
 
-    # ── Тип транспорта ────────────────────────────────────────────────────────
     transport_label = "Троллейбус" if transport == "troll" else "Автобус"
-    html = html.replace(" Автобус: №{{ROUTE}} ", f" {transport_label}: №{{ROUTE}} ")
+    if "{{TRANSPORT_LABEL}}" in html:
+        html = html.replace("{{TRANSPORT_LABEL}}", transport_label)
+    if "{TRANSPORT_LABEL}" in html:
+        html = html.replace("{TRANSPORT_LABEL}", transport_label)
 
-    html = html.replace("{{ROUTE}}",         route)
-    html = html.replace("{{VEHICLE}}",       vehicle)
-    html = html.replace("{{TC}}",            vehicle)
-    html = html.replace("{{DATETIME}}",      payment_dt.strftime("%d.%m.%Y %H:%M"))
-    html = html.replace("{{ELAPSED}}",       elapsed_str)
-    html = html.replace("{{T_PAY}}",         str(payment_unix))
-    html = html.replace("{{TICKET_SERIAL}}", generate_ticket_serial())
-    html = html.replace("{{TICKET_NUMBER}}", generate_ticket_number(payment_dt))
-    html = html.replace("{{PRICE}}",         "53")
+    replacements = {
+        "ROUTE": route,
+        "VEHICLE": vehicle,
+        "TC": vehicle,
+        "DATETIME": payment_dt.strftime("%d.%m.%Y %H:%M"),
+        "ELAPSED": elapsed_str,
+        "T_PAY": str(payment_unix),
+        "TICKET_SERIAL": generate_ticket_serial(),
+        "TICKET_NUMBER": generate_ticket_number(payment_dt),
+        "PRICE": "53",
+    }
+    for key, value in replacements.items():
+        html = html.replace(f"{{{{{key}}}}}", value)
+        html = html.replace(f"{{{key}}}", value)
 
     # ── Адаптивный QR-код ─────────────────────────────────────────────────────
     html = html.replace(
