@@ -223,7 +223,7 @@ def _gh_put_raw(path: str, text_content: str, sha: str | None, commit_msg: str,
 #   Изменение → _save_user_data_async() → пишем в GitHub в фоновом потоке
 # =============================================================================
 
-_SAVE_FIELDS = {"favorites", "tickets_count", "first_seen", "username", "name", "added_at"}
+_SAVE_FIELDS = {"favorites", "tickets_count", "first_seen", "username", "name", "added_at", "transport"}
 _save_lock   = threading.Lock()
 
 
@@ -238,6 +238,7 @@ def _default_user() -> dict:
         "tickets_count": 0,
         "first_seen":    datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
         "added_at":      datetime.now(MSK).strftime("%d.%m.%Y"),
+        "transport":     "bus",
     }
 
 
@@ -492,7 +493,18 @@ def normalize_input(raw: str) -> tuple[str, str] | None:
     return None
 
 
-def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
+def build_html(route: str, vehicle: str, payment_unix: int,
+               transport: str = "bus") -> bytes:
+    """
+    Генерирует HTML билета.
+    transport: "bus" → «Автобус», "troll" → «Троллейбус»
+
+    Таймер: data-pay-unix атрибут добавляется к <body>.
+    extractPaymentUnix() в шаблоне находит его способом 1 (regex).
+    build_html НЕ трогает <script> — шаблон сам делает tg.expand().
+    Формат таймера: ММ:СС, при >59:59 автоматически ЧЧ:ММ:СС.
+    """
+    import re as _re
     with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
@@ -501,6 +513,22 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     pay_utc      = datetime.fromtimestamp(payment_unix, tz=timezone.utc)
     elapsed_secs = max(0, int((now_utc - pay_utc).total_seconds()))
     elapsed_str  = f"{(elapsed_secs % 3600) // 60:02d}:{elapsed_secs % 60:02d}"
+
+    # ── FIX ТАЙМЕРА: data-pay-unix в <body> ──────────────────────────────────
+    # extractPaymentUnix() в шаблоне ищет data-pay-unix="XXXXXXXXXX" способом 1.
+    # Это надёжнее чем "var p = ..." который перезаписывался раньше.
+    body_match = _re.search(r"<body([^>]*)>", html)
+    if body_match:
+        old_body = body_match.group(0)
+        if "data-pay-unix" not in old_body:
+            new_body = old_body.rstrip(">") + f' data-pay-unix="{payment_unix}">'
+        else:
+            new_body = _re.sub(r'data-pay-unix="\d+"', f'data-pay-unix="{payment_unix}"', old_body)
+        html = html.replace(old_body, new_body, 1)
+
+    # ── Тип транспорта ────────────────────────────────────────────────────────
+    transport_label = "Троллейбус" if transport == "troll" else "Автобус"
+    html = html.replace(" Автобус: №{{ROUTE}} ", f" {transport_label}: №{{ROUTE}} ")
 
     html = html.replace("{{ROUTE}}",         route)
     html = html.replace("{{VEHICLE}}",       vehicle)
@@ -512,40 +540,15 @@ def build_html(route: str, vehicle: str, payment_unix: int) -> bytes:
     html = html.replace("{{TICKET_NUMBER}}", generate_ticket_number(payment_dt))
     html = html.replace("{{PRICE}}",         "53")
 
-    # Адаптивный QR-код
+    # ── Адаптивный QR-код ─────────────────────────────────────────────────────
     html = html.replace(
         'style="height:1880px;width:1880px;',
         'style="width:100%;max-width:100vw;height:auto;display:block;',
     )
 
-    # Заменяем содержимое <script> на рабочий таймер (через find/slice, без re)
-    sc_open  = "<script>"
-    sc_close = "</script>"
-    si = html.find(sc_open)
-    ei = html.find(sc_close, si)
-    if si != -1 and ei != -1:
-        timer_js = (
-            "\n(function() {\n"
-            "  var p = " + str(payment_unix - 23) + ";\n"
-            "  function pad(n){return n<10?'0'+n:''+n;}\n"
-            "  function tick(){\n"
-            "    var t=Math.max(0,Math.floor(Date.now()/1000)-p);\n"
-            "    var h=Math.floor(t/3600);\n"
-            "    var m=Math.floor((t%3600)/60);\n"
-            "    var s=t%60;\n"
-            "    var txt=(h>0?pad(h)+':':'')+pad(m)+':'+pad(s);\n"
-            "    document.querySelectorAll('strong').forEach(function(el){\n"
-            "      if(/^\\d{2}:/.test(el.textContent.trim())){el.textContent=txt;}\n"
-            "    });\n"
-            "  }\n"
-            "  tick();setInterval(tick,1000);\n"
-            "})();\n"
-        )
-        html = html[:si + len(sc_open)] + timer_js + html[ei:]
+    # <script> НЕ трогаем — шаблон сам управляет fullscreen и таймером
 
     return html.encode("utf-8")
-
-
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -757,6 +760,7 @@ def _send_ticket(
     vehicle: str,
     msg_date_override: int | None = None,
     is_new_ticket: bool = False,
+    transport: str = "bus",
 ):
     user = get_user(message.chat.id, message.from_user)
 
@@ -787,7 +791,7 @@ def _send_ticket(
     user["last"] = (route, vehicle)
 
     try:
-        html_bytes = build_html(route, vehicle, payment_unix)
+        html_bytes = build_html(route, vehicle, payment_unix, transport=transport)
     except FileNotFoundError:
         bot.send_message(message.chat.id, "❌ Файл template.html не найден.")
         return
@@ -925,18 +929,43 @@ def handle_status(message: types.Message):
 def handle_new_ticket(message: types.Message):
     try:
         if not check_access(message): return
-        get_user(message.from_user.id, message.from_user)["state"] = "awaiting_input"
-        bot.send_message(
-            message.chat.id,
-            "Введи *маршрут* и *номер ТС* через пробел.\n\nПример: `10А 1140`",
-            parse_mode="Markdown",
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("🚌 Автобус",    callback_data="transport:bus"),
+            types.InlineKeyboardButton("🚎 Троллейбус", callback_data="transport:troll"),
         )
+        bot.send_message(message.chat.id, "Выбери тип транспорта:", reply_markup=kb)
     except Exception as e:
         log.exception("Ошибка в handle_new_ticket")
         try:
             bot.send_message(message.chat.id, "⚠️ Ошибка инициализации.")
-        except:
-            pass
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("transport:"))
+def handle_transport_choice(call: types.CallbackQuery):
+    try:
+        if not is_allowed(call.from_user.id):
+            bot.answer_callback_query(call.id, "⛔ Нет доступа.")
+            return
+        transport = call.data[10:]
+        label = "🚌 Автобус" if transport == "bus" else "🚎 Троллейбус"
+        user = get_user(call.from_user.id, call.from_user)
+        user["state"]     = "awaiting_input"
+        user["transport"] = transport
+        bot.answer_callback_query(call.id)
+        text = label + " выбран.\n\nВведи *маршрут* и *номер ТС* через пробел.\n\nПример: `10А 1140`"
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        log.exception("Ошибка в handle_transport_choice")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ Ошибка.")
+        except: pass
 
 
 @bot.message_handler(func=lambda m: m.text == "🔁 Повторить последний")
@@ -948,7 +977,8 @@ def handle_repeat_last(message: types.Message):
             bot.send_message(message.chat.id, "⚠️ Нет данных о последнем билете. Сначала создай новый.")
             return
         route, vehicle = user["last"]
-        _send_ticket(message, route, vehicle)
+        transport = user.get("transport", "bus")
+        _send_ticket(message, route, vehicle, transport=transport)
     except Exception as e:
         log.exception("Ошибка в handle_repeat_last")
         try:
@@ -1043,7 +1073,8 @@ def handle_input(message: types.Message):
                 f"✏️ Автокоррекция: `{original_text}` → `{normalized_text}`",
                 parse_mode="Markdown",
             )
-        _send_ticket(message, route, vehicle, is_new_ticket=True)
+        transport = user.get("transport", "bus")
+        _send_ticket(message, route, vehicle, is_new_ticket=True, transport=transport)
     except Exception as e:
         log.exception("Ошибка в handle_input")
         try:
@@ -1061,9 +1092,11 @@ def handle_vehicle_input(message: types.Message):
         user  = get_user(message.from_user.id, message.from_user)
         route = user["state"].split(":", 1)[1]
         user["state"] = None
+        transport = user.get("transport", "bus")
         _send_ticket(
             message, route, message.text.strip(),
             msg_date_override=int(datetime.now(timezone.utc).timestamp()),
+            transport=transport,
         )
     except Exception as e:
         log.exception("Ошибка в handle_vehicle_input")
@@ -1096,13 +1129,18 @@ def handle_fav_callback(call: types.CallbackQuery):
             return
         
         if payload == "back":
-            bot.edit_message_text(
-                f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
-            )
+            if not user["favorites"]:
+                bot.edit_message_text(
+                    "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
+                    call.message.chat.id, call.message.message_id,
+                )
+            else:
+                bot.edit_message_text(
+                    f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
+                    call.message.chat.id, call.message.message_id,
+                    parse_mode="Markdown",
+                    reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
+                )
             bot.answer_callback_query(call.id)
             return
 
