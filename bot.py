@@ -381,8 +381,8 @@ def _whitelist_remove(user_id: int) -> None:
 flask_app = Flask(__name__)
 bot       = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-# Время жизни билета — 2 часа с момента генерации
-TICKET_TTL = 7200  # секунд
+# Время жизни билета — 1 час с момента генерации
+TICKET_TTL = 3600  # секунд
 
 # Хранилище HTML-билетов: token → (html_bytes, expires_at)
 # expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
@@ -511,11 +511,22 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
-    payment_dt   = datetime.fromtimestamp(payment_unix, tz=MSK)
+    # Проверяем что шаблон непустой
+    if not html or not html.strip():
+        raise FileNotFoundError("template.html is missing or empty")
+
+    payment_dt   = datetime.fromtimestamp(int(payment_unix), tz=MSK)
     now_utc      = datetime.now(timezone.utc)
-    pay_utc      = datetime.fromtimestamp(payment_unix, tz=timezone.utc)
+    pay_utc      = datetime.fromtimestamp(int(payment_unix), tz=timezone.utc)
     elapsed_secs = max(0, int((now_utc - pay_utc).total_seconds()))
-    elapsed_str  = f"{(elapsed_secs % 3600) // 60:02d}:{elapsed_secs % 60:02d}"
+    # Формат таймера: MM:SS или HH:MM:SS при длительности >= 1 часа
+    if elapsed_secs < 3600:
+        elapsed_str = f"{elapsed_secs // 60:02d}:{elapsed_secs % 60:02d}"
+    else:
+        h = elapsed_secs // 3600
+        m = (elapsed_secs % 3600) // 60
+        s = elapsed_secs % 60
+        elapsed_str = f"{h:02d}:{m:02d}:{s:02d}"
 
     # ── FIX ТАЙМЕРА: data-pay-unix в <body> ──────────────────────────────────
     # extractPaymentUnix() в шаблоне ищет data-pay-unix="XXXXXXXXXX" способом 1.
@@ -782,14 +793,28 @@ def _send_ticket(
             return
     # ──────────────────────────────────────────────────────────────────────────
 
+    # Приводим дату оплаты к unix-timestamp в секундах (int)
+    def _to_unix(v):
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, datetime):
+            # Если datetime без tzinfo — считаем как UTC
+            try:
+                return int(v.timestamp())
+            except Exception:
+                return int(v.replace(tzinfo=timezone.utc).timestamp())
+        try:
+            return int(float(v))
+        except Exception:
+            raise ValueError("Cannot convert value to unix timestamp")
+
     if msg_date_override is not None:
-        payment_unix = msg_date_override
-        user["payment_unix"] = payment_unix
-    elif user["payment_unix"] is not None and not is_new_ticket:
-        payment_unix = user["payment_unix"]
+        payment_unix = _to_unix(msg_date_override)
+    elif user.get("payment_unix") is not None and not is_new_ticket:
+        payment_unix = _to_unix(user["payment_unix"])
     else:
-        payment_unix = message.date
-        user["payment_unix"] = payment_unix
+        payment_unix = _to_unix(message.date)
+    user["payment_unix"] = payment_unix
 
     user["last"] = (route, vehicle)
 
@@ -1683,6 +1708,13 @@ _load_user_data()
 
 # Вызываем при импорте — gunicorn не запускает __main__
 setup_webhook()
+
+# Проверяем наличие шаблона и предупреждаем в лог, чтобы не было пустых билетов
+try:
+    if not os.path.exists(TEMPLATE_PATH) or os.path.getsize(TEMPLATE_PATH) == 0:
+        log.warning("template.html отсутствует или пустой: %s", TEMPLATE_PATH)
+except Exception as e:
+    log.warning("Не удалось проверить template.html: %s", e)
 
 
 if __name__ == "__main__":
