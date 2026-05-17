@@ -1050,20 +1050,27 @@ def handle_repeat_last(message: types.Message):
 
 @bot.message_handler(func=lambda m: m.text == "⭐ Избранное")
 def handle_favorites(message: types.Message):
-    if not check_access(message): return
-    user = get_user(message.from_user.id, message.from_user)
-    if not user["favorites"]:
+    try:
+        if not check_access(message): return
+        user = get_user(message.from_user.id, message.from_user)
+        if not user["favorites"]:
+            bot.send_message(
+                message.chat.id,
+                "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
+            )
+            return
         bot.send_message(
             message.chat.id,
-            "⭐ Список избранного пуст.\n\nПосле генерации нажми «⭐ В избранное».",
+            f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
+            parse_mode="Markdown",
+            reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
         )
-        return
-    bot.send_message(
-        message.chat.id,
-        f"⭐ *Избранные маршруты ({len(user['favorites'])}) шт.:*\n\nНажми на маршрут или выбери редактирование.",
-        parse_mode="Markdown",
-        reply_markup=favorites_keyboard(user["favorites"], edit_mode=False),
-    )
+    except Exception as e:
+        log.exception("Ошибка в handle_favorites")
+        try:
+            bot.send_message(message.chat.id, "⚠️ Ошибка при открытии избранного.")
+        except:
+            pass
 
 
 @bot.message_handler(func=lambda m: m.text == "📋 Справка")
@@ -1177,6 +1184,9 @@ def handle_vehicle_input(message: types.Message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("fav:"))
 def handle_fav_callback(call: types.CallbackQuery):
     try:
+        if not is_allowed(call.from_user.id):
+            bot.answer_callback_query(call.id, "⛔ Нет доступа.")
+            return
         user    = get_user(call.from_user.id)
         payload = call.data[4:]
 
@@ -1241,9 +1251,12 @@ def handle_fav_callback(call: types.CallbackQuery):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("remove_fav:"))
 def handle_remove_fav_callback(call: types.CallbackQuery):
     try:
+        if not is_allowed(call.from_user.id):
+            bot.answer_callback_query(call.id, "⛔ Нет доступа.")
+            return
         user = get_user(call.from_user.id)
         idx = int(call.data[11:])
-        if idx >= len(user["favorites"]):
+        if idx < 0 or idx >= len(user["favorites"]):
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
             return
         
@@ -1316,23 +1329,6 @@ def handle_add_fav_callback(call: types.CallbackQuery):
             bot.answer_callback_query(call.id, "⚠️ Ошибка добавления в избранное.")
         except:
             pass
-
-
-# =============================================================================
-# KEEP-ALIVE — не даём Render усыпить сервис (бесплатный план, 15 мин таймаут)
-# =============================================================================
-def _keepalive_loop():
-    import time, urllib.request
-    url = f"{RENDER_URL}/healthz"
-    while True:
-        time.sleep(600)
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                log.info("Keep-alive ping: %s", resp.status)
-        except Exception as e:
-            log.warning("Keep-alive ping failed: %s", e)
-
-threading.Thread(target=_keepalive_loop, daemon=True, name="keepalive").start()
 
 
 @bot.message_handler(commands=["cancel"])
