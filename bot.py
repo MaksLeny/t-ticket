@@ -1765,6 +1765,53 @@ def handle_broadcast(message: types.Message):
 
 
 # =============================================================================
+# KEEPALIVE — самопинг каждые 40 сек, чтобы Render не усыпил сервис
+# =============================================================================
+
+def _keepalive_loop() -> None:
+    """
+    Фоновый поток: делает GET /healthz на свой же RENDER_URL каждые 40 секунд.
+    Это не даёт Render-у засыпать и сохраняет ticket_store в памяти.
+    Поток daemon=True — завершается вместе с процессом, не мешает graceful shutdown.
+    """
+    import http.client as _hc
+    import urllib.parse as _up
+    import time as _time
+
+    # Ждём 20 сек после старта — даём gunicorn полностью подняться
+    _time.sleep(20)
+
+    parsed   = _up.urlparse(RENDER_URL)
+    host     = parsed.netloc          # напр. my-bot.onrender.com
+    use_ssl  = parsed.scheme == "https"
+    interval = 40                     # секунд между пингами
+
+    log.info("Keepalive запущен: пинг %s/healthz каждые %d сек", RENDER_URL, interval)
+
+    while True:
+        try:
+            conn = (_hc.HTTPSConnection(host, timeout=10) if use_ssl
+                    else _hc.HTTPConnection(host, timeout=10))
+            conn.request("GET", "/healthz")
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            log.debug("Keepalive /healthz → %s", resp.status)
+        except Exception as exc:
+            log.warning("Keepalive ошибка: %s", exc)
+        _time.sleep(interval)
+
+
+def _start_keepalive() -> None:
+    """Запускает keepalive-поток если RENDER_URL задан."""
+    if not RENDER_URL:
+        log.warning("Keepalive не запущен: RENDER_URL не задан")
+        return
+    t = threading.Thread(target=_keepalive_loop, daemon=True, name="keepalive")
+    t.start()
+
+
+# =============================================================================
 # ЗАПУСК
 # =============================================================================
 
@@ -1788,6 +1835,9 @@ _load_user_data()
 
 # Вызываем при импорте — gunicorn не запускает __main__
 setup_webhook()
+
+# Запускаем самопинг — не даём Render-у усыплять сервис
+_start_keepalive()
 
 
 if __name__ == "__main__":
