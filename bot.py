@@ -230,7 +230,8 @@ def _gh_put_raw(path: str, text_content: str, sha: str | None, commit_msg: str,
 # =============================================================================
 
 _SAVE_FIELDS = {"favorites", "tickets_count", "first_seen", "username", "name", "added_at", "transport"}
-_save_lock   = threading.Lock()
+_save_lock      = threading.Lock()
+_user_data_lock = threading.Lock()  # защита от concurrent writes в user_data
 
 
 def _default_user() -> dict:
@@ -293,10 +294,12 @@ def _do_save_user_data() -> bool:
     Вызывается с _save_lock уже захваченным.
     """
     _, sha = _gh_get_raw(USERDATA_FILE)
-    snapshot = {
-        str(uid): {k: d[k] for k in _SAVE_FIELDS if k in d}
-        for uid, d in user_data.items()
-    }
+    # Снимок под блокировкой — защита от "dictionary changed size during iteration"
+    with _user_data_lock:
+        snapshot = {
+            str(uid): {k: d[k] for k in _SAVE_FIELDS if k in d}
+            for uid, d in user_data.items()
+        }
     ts = datetime.now(MSK).strftime("%d.%m.%Y %H:%M")
     ok = _gh_put_raw(
         USERDATA_FILE,
@@ -454,8 +457,9 @@ def serve_ticket(token: str):
 @flask_app.route("/healthz")
 def health():
     now = datetime.now(timezone.utc).timestamp()
-    active = sum(1 for _, (_, exp) in ticket_store.items() if now <= exp)
-    total  = len(ticket_store)
+    with _ticket_store_lock:
+        active = sum(1 for _, (_, exp) in ticket_store.items() if now <= exp)
+        total  = len(ticket_store)
     return {"status": "ok", "tickets_active": active, "tickets_total": total}, 200
 
 
@@ -486,11 +490,17 @@ def normalize_input(raw: str) -> tuple[str, str] | None:
     if not tokens:
         return None
 
+    # Защита от слишком длинного ввода
+    if len(raw) > 50:
+        return None
+
     # Случай 1: ровно 2 токена — стандартный ввод "10А 1140"
     if len(tokens) == 2:
         route_raw, vehicle = tokens
-        # Маршрут может быть написан маленькими: "10а" → "10А"
         route = route_raw.upper()
+        # Базовая валидация: маршрут содержит цифры, ТС не длиннее 20 символов
+        if not _re.search(r'\d', route) or len(vehicle) > 20 or len(route) > 10:
+            return None
         return route, vehicle
 
     # Случай 2: 3 токена — маршрут разбит: "10 А 1140" или "10А 11 40" (опечатка в ТС)
@@ -644,14 +654,15 @@ def log_event(user, action: str) -> None:
 
 
 def get_user(uid: int, tg_user=None) -> dict:
-    if uid not in user_data:
-        user_data[uid] = _default_user()
-    if tg_user is not None:
-        user_data[uid]["username"] = tg_user.username or "—"
-        user_data[uid]["name"] = (
-            f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip() or "—"
-        )
-    return user_data[uid]
+    with _user_data_lock:
+        if uid not in user_data:
+            user_data[uid] = _default_user()
+        if tg_user is not None:
+            user_data[uid]["username"] = tg_user.username or "—"
+            user_data[uid]["name"] = (
+                f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip() or "—"
+            )
+        return user_data[uid]
 
 def reset_state(uid: int) -> None:
     get_user(uid)["state"] = None
@@ -1132,10 +1143,17 @@ def handle_vehicle_input(message: types.Message):
         if not check_access(message): return
         user  = get_user(message.from_user.id, message.from_user)
         route = user["state"].split(":", 1)[1]
+        vehicle = message.text.strip()
+        if not vehicle:
+            bot.send_message(message.chat.id, "❌ Номер ТС не может быть пустым. Введи номер ТС:")
+            return
+        if len(vehicle) > 20:
+            bot.send_message(message.chat.id, "❌ Номер ТС слишком длинный (макс. 20 символов). Введи номер ТС:")
+            return
         user["state"] = None
         transport = user.get("transport", "bus")
         _send_ticket(
-            message, route, message.text.strip(),
+            message, route, vehicle,
             msg_date_override=int(datetime.now(timezone.utc).timestamp()),
             transport=transport,
         )
@@ -1185,8 +1203,12 @@ def handle_fav_callback(call: types.CallbackQuery):
             bot.answer_callback_query(call.id)
             return
 
-        idx = int(payload)
-        if idx >= len(user["favorites"]):
+        try:
+            idx = int(payload)
+        except ValueError:
+            bot.answer_callback_query(call.id, "⚠️ Неверный формат данных.")
+            return
+        if idx >= len(user["favorites"]) or idx < 0:
             bot.answer_callback_query(call.id, "⚠️ Запись устарела.")
             return
 
@@ -1329,7 +1351,9 @@ def handle_admin(message: types.Message):
             active_tickets = sum(1 for _, (_, exp) in ticket_store.items() if now <= exp)
         with _event_log_lock:
             log_snapshot = list(event_log)
-        total_users    = len(user_data)
+        with _user_data_lock:
+            user_data_snapshot = dict(user_data)
+        total_users    = len(user_data_snapshot)
         tickets_today  = sum(
             1 for e in log_snapshot
             if e["time"].date() == today_msk and "билет" in e["action"]
@@ -1347,10 +1371,12 @@ def handle_admin(message: types.Message):
         users_text = "\n".join(
             f"  {'👑' if uid in ADMIN_IDS else '👤'} `{uid}` @{d['username']} {d['name']} "
             f"| билетов: {d['tickets_count']} | с {d['first_seen']}"
-            for uid, d in user_data.items()
+            for uid, d in user_data_snapshot.items()
         ) or "  нет пользователей"
 
-        text = (
+        # Telegram лимит — 4096 символов на сообщение. Обрезаем users_text если нужно.
+        MAX_MSG = 4096
+        header = (
             "🛠 *Админ-панель*\n\n"
             f"⏱ *{_format_uptime()}*\n\n"
             f"👥 Всего пользователей: *{total_users}*\n"
@@ -1358,8 +1384,12 @@ def handle_admin(message: types.Message):
             f"🟢 Активных билетов сейчас: *{active_tickets}*\n"
             f"📅 Активных пользователей сегодня: *{users_today}*\n\n"
             f"*Последние действия:*\n{events_text}\n\n"
-            f"*Все пользователи:*\n{users_text}"
+            f"*Все пользователи:*\n"
         )
+        available = MAX_MSG - len(header) - 10
+        if len(users_text) > available:
+            users_text = users_text[:available] + "\n  …(обрезано)"
+        text = header + users_text
         bot.send_message(message.chat.id, text, parse_mode="Markdown")
         log.info("Админ-панель: user_id=%s", message.from_user.id)
     except Exception as e:
