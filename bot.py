@@ -74,6 +74,12 @@ WEBHOOK_SECRET = _hs.sha256(BOT_TOKEN.encode()).hexdigest()[:32]
 log.info("Конфигурация загружена. RENDER_URL=%s", RENDER_URL)
 
 # =============================================================================
+# ХРАНИЛИЩЕ СОСТОЯНИЙ — объявляем здесь, до первого использования в _load_user_data
+# =============================================================================
+user_data: dict[int, dict] = {}
+MAX_LOG = 500
+
+# =============================================================================
 # ДОСТУП
 # ADMIN_IDS — полный доступ: бот + команда /admin.
 # USER_IDS  — только доступ к боту и созданию билетов.
@@ -387,10 +393,12 @@ TICKET_TTL = 7200  # секунд
 # Хранилище HTML-билетов: token → (html_bytes, expires_at)
 # expires_at — Unix-timestamp (UTC) после которого запись считается устаревшей.
 ticket_store: dict[str, tuple] = {}
+_ticket_store_lock = threading.Lock()
 
 # Rate limiting: user_id → list[timestamp] (последние генерации за скользящий час)
 RATE_LIMIT_MAX  = 10   # максимум билетов в час на пользователя
 rate_limit_store: dict[int, list[float]] = {}
+_rate_limit_lock = threading.Lock()
 
 
 @flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
@@ -401,7 +409,11 @@ def webhook():
     if incoming != WEBHOOK_SECRET:
         log.warning("Webhook: неверный secret от %s — отклонён", flask_request.remote_addr)
         abort(403)
-    update = telebot.types.Update.de_json(flask_request.get_json(force=True))
+    data = flask_request.get_json(force=True, silent=True)
+    if data is None:
+        log.warning("Webhook: пустое или невалидное тело запроса от %s", flask_request.remote_addr)
+        abort(400)
+    update = telebot.types.Update.de_json(data)
     bot.process_new_updates([update])
     return "ok", 200
 
@@ -412,8 +424,7 @@ def webhook():
 @flask_app.route("/")
 def serve_index():
     try:
-        with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
-            html = f.read()
+        html = _get_template()
         return html, 200, {"Content-Type": "text/html; charset=utf-8"}
     except FileNotFoundError:
         abort(404)
@@ -423,13 +434,15 @@ def serve_index():
 # Используется только внутренним fetch в template.html — не открывается напрямую.
 @flask_app.route("/ticket/<token>")
 def serve_ticket(token: str):
-    entry = ticket_store.get(token)
+    with _ticket_store_lock:
+        entry = ticket_store.get(token)
     if entry is None:
         abort(404)
     html_bytes, expires_at = entry
     # Билет просрочен — 410 Gone
     if datetime.now(timezone.utc).timestamp() > expires_at:
-        ticket_store.pop(token, None)
+        with _ticket_store_lock:
+            ticket_store.pop(token, None)
         abort(410)
     # Добавляем CORS-заголовок — fetch из того же origin, но на всякий случай
     return html_bytes, 200, {
@@ -496,6 +509,20 @@ def normalize_input(raw: str) -> tuple[str, str] | None:
     return None
 
 
+_template_cache: str | None = None
+_template_cache_lock = threading.Lock()
+
+
+def _get_template() -> str:
+    """Читает template.html с диска один раз, затем отдаёт из кеша."""
+    global _template_cache
+    with _template_cache_lock:
+        if _template_cache is None:
+            with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
+                _template_cache = f.read()
+        return _template_cache
+
+
 def build_html(route: str, vehicle: str, payment_unix: int,
                transport: str = "bus") -> bytes:
     """
@@ -508,8 +535,7 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     Формат таймера: ММ:СС, при >59:59 автоматически ЧЧ:ММ:СС.
     """
     import re as _re
-    with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
-        html = f.read()
+    html = _get_template()
 
     # payment_unix может быть int/float (timestamp) или datetime
     if isinstance(payment_unix, datetime):
@@ -600,26 +626,21 @@ def notify_admins_about_unauthorized_start(message: types.Message) -> None:
         except Exception as e:
             log.warning("Не удалось уведомить админа %s: %s", admin_id, e)
 
-# =============================================================================
-# ХРАНИЛИЩЕ СОСТОЯНИЙ
-# =============================================================================
+import collections as _collections
 
-user_data: dict[int, dict] = {}
-
-# Лог событий — последние 500 действий
-event_log: list[dict] = []
-MAX_LOG = 500
+# Лог событий — последние 500 действий (deque O(1) вместо list.pop(0) O(n))
+event_log: _collections.deque = _collections.deque(maxlen=MAX_LOG)
+_event_log_lock = threading.Lock()
 
 def log_event(user, action: str) -> None:
-    event_log.append({
-        "time":     datetime.now(MSK),
-        "user_id":  user.id,
-        "username": user.username or "—",
-        "name":     f"{user.first_name or ''} {user.last_name or ''}".strip() or "—",
-        "action":   action,
-    })
-    if len(event_log) > MAX_LOG:
-        event_log.pop(0)
+    with _event_log_lock:
+        event_log.append({
+            "time":     datetime.now(MSK),
+            "user_id":  user.id,
+            "username": user.username or "—",
+            "name":     f"{user.first_name or ''} {user.last_name or ''}".strip() or "—",
+            "action":   action,
+        })
 
 
 def get_user(uid: int, tg_user=None) -> dict:
@@ -732,24 +753,26 @@ def _check_rate_limit(user_id: int) -> tuple[bool, int]:
     """
     now = datetime.now(timezone.utc).timestamp()
     window_start = now - 3600
-    timestamps = rate_limit_store.get(user_id, [])
-    # Оставляем только события за последний час
-    timestamps = [t for t in timestamps if t > window_start]
-    rate_limit_store[user_id] = timestamps
-    if len(timestamps) >= RATE_LIMIT_MAX:
-        # Когда освободится следующий слот
-        oldest = min(timestamps)
-        wait_secs = int(oldest + 3600 - now) + 1
-        return False, wait_secs
-    return True, RATE_LIMIT_MAX - len(timestamps)
+    with _rate_limit_lock:
+        timestamps = rate_limit_store.get(user_id, [])
+        # Оставляем только события за последний час
+        timestamps = [t for t in timestamps if t > window_start]
+        rate_limit_store[user_id] = timestamps
+        if len(timestamps) >= RATE_LIMIT_MAX:
+            # Когда освободится следующий слот
+            oldest = min(timestamps)
+            wait_secs = int(oldest + 3600 - now) + 1
+            return False, wait_secs
+        return True, RATE_LIMIT_MAX - len(timestamps)
 
 
 def _register_rate_limit(user_id: int) -> None:
     """Регистрирует факт генерации билета для rate limiting."""
     now = datetime.now(timezone.utc).timestamp()
-    if user_id not in rate_limit_store:
-        rate_limit_store[user_id] = []
-    rate_limit_store[user_id].append(now)
+    with _rate_limit_lock:
+        if user_id not in rate_limit_store:
+            rate_limit_store[user_id] = []
+        rate_limit_store[user_id].append(now)
 
 
 def _cleanup_expired_tickets() -> int:
@@ -760,9 +783,10 @@ def _cleanup_expired_tickets() -> int:
     Возвращает количество удалённых записей.
     """
     now = datetime.now(timezone.utc).timestamp()
-    expired = [t for t, (_, exp) in ticket_store.items() if now > exp]
-    for t in expired:
-        ticket_store.pop(t, None)
+    with _ticket_store_lock:
+        expired = [t for t, (_, exp) in ticket_store.items() if now > exp]
+        for t in expired:
+            ticket_store.pop(t, None)
     return len(expired)
 
 # =============================================================================
@@ -817,7 +841,8 @@ def _send_ticket(
     token = uuid.uuid4().hex
     # Билет живёт TICKET_TTL секунд с момента генерации
     expires_at = datetime.now(timezone.utc).timestamp() + TICKET_TTL
-    ticket_store[token] = (html_bytes, expires_at)
+    with _ticket_store_lock:
+        ticket_store[token] = (html_bytes, expires_at)
 
     log_event(message.from_user, f"билет №{route} ТС {vehicle}")
     user["tickets_count"] = user.get("tickets_count", 0) + 1
@@ -923,8 +948,9 @@ def handle_status(message: types.Message):
         else:
             status_lines.append("⭐ Избранные маршруты: нет")
         
-        active_count = sum(1 for _, (_, exp) in ticket_store.items() 
-                           if datetime.now(timezone.utc).timestamp() <= exp)
+        with _ticket_store_lock:
+            active_count = sum(1 for _, (_, exp) in ticket_store.items()
+                               if datetime.now(timezone.utc).timestamp() <= exp)
         status_lines.append(f"🎫 Активные билеты в системе: {active_count}")
         
         bot.send_message(
@@ -1299,17 +1325,20 @@ def handle_admin(message: types.Message):
         now       = datetime.now(timezone.utc).timestamp()
         today_msk = datetime.now(MSK).date()
 
-        active_tickets = sum(1 for _, (_, exp) in ticket_store.items() if now <= exp)
+        with _ticket_store_lock:
+            active_tickets = sum(1 for _, (_, exp) in ticket_store.items() if now <= exp)
+        with _event_log_lock:
+            log_snapshot = list(event_log)
         total_users    = len(user_data)
         tickets_today  = sum(
-            1 for e in event_log
+            1 for e in log_snapshot
             if e["time"].date() == today_msk and "билет" in e["action"]
         )
         users_today = len({
-            e["user_id"] for e in event_log if e["time"].date() == today_msk
+            e["user_id"] for e in log_snapshot if e["time"].date() == today_msk
         })
 
-        last_events = event_log[-5:][::-1]
+        last_events = log_snapshot[-5:][::-1]
         events_text = "\n".join(
             f"  `{e['time'].strftime('%H:%M')}` @{e['username']} ({e['user_id']}) — {e['action']}"
             for e in last_events
@@ -1642,34 +1671,46 @@ def handle_broadcast(message: types.Message):
             f"⏳ Рассылаю {len(all_ids)} пользователям...",
         )
 
-        ok_count   = 0
-        fail_count = 0
-        for uid in all_ids:
+        # Рассылку выполняем в отдельном потоке — не блокируем webhook worker
+        def _do_broadcast(ids: set, text: str, chat_id: int, wait_msg_id: int, sender_id: int):
+            ok_count   = 0
+            fail_count = 0
+            for uid in ids:
+                try:
+                    bot.send_message(uid, text, parse_mode="Markdown")
+                    ok_count += 1
+                except Exception as exc:
+                    log.warning("broadcast: не удалось отправить %s: %s", uid, exc)
+                    fail_count += 1
+
+            log.info("Broadcast от %s: всего=%d, ОК=%d, ошибок=%d",
+                     sender_id, len(ids), ok_count, fail_count)
+
             try:
-                bot.send_message(uid, broadcast_text, parse_mode="Markdown")
-                ok_count += 1
-            except Exception as exc:
-                log.warning("broadcast: не удалось отправить %s: %s", uid, exc)
-                fail_count += 1
+                bot.delete_message(chat_id, wait_msg_id)
+            except Exception:
+                pass
 
-        log_event(message.from_user, f"broadcast: {len(all_ids)} получателей, ОК={ok_count}")
-        log.info("Broadcast от %s: всего=%d, ОК=%d, ошибок=%d",
-                 message.from_user.id, len(all_ids), ok_count, fail_count)
+            result_icon = "✅" if fail_count == 0 else "⚠️"
+            try:
+                bot.send_message(
+                    chat_id,
+                    f"{result_icon} *Рассылка завершена*\n\n"
+                    f"✅ Доставлено: *{ok_count}*\n"
+                    f"❌ Не доставлено: *{fail_count}*\n\n"
+                    f"💬 Текст:\n_{text_to_send}_",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
-        try:
-            bot.delete_message(message.chat.id, wait.message_id)
-        except Exception:
-            pass
-
-        result_icon = "✅" if fail_count == 0 else "⚠️"
-        bot.send_message(
-            message.chat.id,
-            f"{result_icon} *Рассылка завершена*\n\n"
-            f"✅ Доставлено: *{ok_count}*\n"
-            f"❌ Не доставлено: *{fail_count}*\n\n"
-            f"💬 Текст:\n_{text_to_send}_",
-            parse_mode="Markdown",
-        )
+        log_event(message.from_user, f"broadcast: {len(all_ids)} получателей")
+        threading.Thread(
+            target=_do_broadcast,
+            args=(all_ids, broadcast_text, message.chat.id, wait.message_id, message.from_user.id),
+            daemon=False,
+            name="broadcast",
+        ).start()
     except Exception as e:
         log.exception("Ошибка в handle_broadcast")
         try:
