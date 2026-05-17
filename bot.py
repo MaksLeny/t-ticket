@@ -545,6 +545,12 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     Формат таймера: ММ:СС, при >59:59 автоматически ЧЧ:ММ:СС.
     """
     import re as _re
+
+    def _safe_repl(val: str):
+        """Возвращает функцию-замену для re.sub, защищённую от спецсимволов в val."""
+        escaped = val.replace("\\", "\\\\")
+        return escaped
+
     html = _get_template()
 
     # payment_unix может быть int/float (timestamp) или datetime
@@ -582,8 +588,8 @@ def build_html(route: str, vehicle: str, payment_unix: int,
     # Поддерживаем несколько форматов плейсхолдеров, например:
     #   {{ROUTE}}, {route}, {ROUTE} и т.п. — в шаблонах могут встречаться
     # одинарные фигурные скобки и разный регистр.
-    html = _re.sub(r'(?:\{\{\s*ROUTE\s*\}\}|\{\s*ROUTE\s*\})', route, html, flags=_re.IGNORECASE)
-    html = _re.sub(r'(?:\{\{\s*VEHICLE\s*\}\}|\{\s*VEHICLE\s*\}|\{\s*TC\s*\})', vehicle, html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*ROUTE\s*\}\}|\{\s*ROUTE\s*\})', _safe_repl(route), html, flags=_re.IGNORECASE)
+    html = _re.sub(r'(?:\{\{\s*VEHICLE\s*\}\}|\{\s*VEHICLE\s*\}|\{\s*TC\s*\})', _safe_repl(vehicle), html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*DATETIME\s*\}\}|\{\s*DATETIME\s*\})', payment_dt.strftime("%d.%m.%Y %H:%M"), html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*ELAPSED\s*\}\}|\{\s*ELAPSED\s*\})', elapsed_str, html, flags=_re.IGNORECASE)
     html = _re.sub(r'(?:\{\{\s*TICKET_SERIAL\s*\}\}|\{\s*TICKET_SERIAL\s*\})', generate_ticket_serial(), html, flags=_re.IGNORECASE)
@@ -1001,6 +1007,9 @@ def handle_transport_choice(call: types.CallbackQuery):
             bot.answer_callback_query(call.id, "⛔ Нет доступа.")
             return
         transport = call.data[10:]
+        if transport not in ("bus", "troll"):
+            bot.answer_callback_query(call.id, "⚠️ Неверный тип транспорта.")
+            return
         label = "🚌 Автобус" if transport == "bus" else "🚎 Троллейбус"
         user = get_user(call.from_user.id, call.from_user)
         user["state"]     = "awaiting_input"
@@ -1570,7 +1579,8 @@ def handle_allowed(message: types.Message):
         if not check_admin(message): return
 
         def fmt(uid: int, icon: str) -> str:
-            d       = user_data.get(uid, {})
+            with _user_data_lock:
+                d = dict(user_data.get(uid, {}))
             uname   = f"@{d.get('username','—')}" if d.get('username','—') != '—' else 'без username'
             name    = d.get('name', '—')
             added   = d.get('added_at', '—')
@@ -1603,7 +1613,10 @@ def handle_allowed(message: types.Message):
         total = len(ADMIN_IDS) + len(USER_IDS) + len(dynamic_allowed_users)
         lines.append(f"\n📊 *Итого: {total} пользователей*")
 
-        bot.send_message(message.chat.id, "\n".join(lines), parse_mode="Markdown")
+        text = "\n".join(lines)
+        if len(text) > 4096:
+            text = text[:4080] + "\n…(обрезано)"
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
     except Exception as e:
         log.exception("Ошибка в handle_allowed")
         try:
@@ -1638,15 +1651,17 @@ def handle_datasync(message: types.Message):
 
         if ok:
             ts = datetime.now(MSK).strftime("%d.%m.%Y %H:%M:%S")
+            with _user_data_lock:
+                n_users = len(user_data)
             bot.send_message(
                 message.chat.id,
                 f"✅ *Синхронизация выполнена*\n\n"
                 f"📁 Файл `user_data.json` обновлён на GitHub\n"
-                f"👥 Пользователей сохранено: *{len(user_data)}*\n"
+                f"👥 Пользователей сохранено: *{n_users}*\n"
                 f"🕐 Время: {ts}",
                 parse_mode="Markdown",
             )
-            log.info("datasync: сохранено %d пользователей", len(user_data))
+            log.info("datasync: сохранено %d пользователей", n_users)
         else:
             bot.send_message(
                 message.chat.id,
@@ -1702,7 +1717,7 @@ def handle_broadcast(message: types.Message):
         )
 
         # Рассылку выполняем в отдельном потоке — не блокируем webhook worker
-        def _do_broadcast(ids: set, text: str, chat_id: int, wait_msg_id: int, sender_id: int):
+        def _do_broadcast(ids: set, text: str, chat_id: int, wait_msg_id: int, sender_id: int, original_text: str):
             ok_count   = 0
             fail_count = 0
             for uid in ids:
@@ -1728,7 +1743,7 @@ def handle_broadcast(message: types.Message):
                     f"{result_icon} *Рассылка завершена*\n\n"
                     f"✅ Доставлено: *{ok_count}*\n"
                     f"❌ Не доставлено: *{fail_count}*\n\n"
-                    f"💬 Текст:\n_{text_to_send}_",
+                    f"💬 Текст:\n_{original_text}_",
                     parse_mode="Markdown",
                 )
             except Exception:
@@ -1737,7 +1752,7 @@ def handle_broadcast(message: types.Message):
         log_event(message.from_user, f"broadcast: {len(all_ids)} получателей")
         threading.Thread(
             target=_do_broadcast,
-            args=(all_ids, broadcast_text, message.chat.id, wait.message_id, message.from_user.id),
+            args=(all_ids, broadcast_text, message.chat.id, wait.message_id, message.from_user.id, text_to_send),
             daemon=False,
             name="broadcast",
         ).start()
@@ -1755,6 +1770,13 @@ def handle_broadcast(message: types.Message):
 
 def setup_webhook():
     webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    try:
+        info = bot.get_webhook_info()
+        if info.url == webhook_url and info.pending_update_count == 0:
+            log.info("Webhook уже установлен: %s", webhook_url)
+            return
+    except Exception:
+        pass
     bot.remove_webhook()
     # Передаём secret_token — Telegram будет добавлять его в заголовок каждого запроса
     bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
